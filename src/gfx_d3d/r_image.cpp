@@ -763,10 +763,17 @@ void __cdecl R_SetPicmip()
                 imageGlobals.picmipBump = 0;
                 imageGlobals.picmipSpec = 0;
             }
+#ifdef KISAK_SP
+            minPicmip = 0;
+            imageGlobals.picmip = 0;
+            imageGlobals.picmipBump = 0;
+            imageGlobals.picmipSpec = 0;
+#else
             if (sysMemInMegs > 0x180)
                 minPicmip = sysMemInMegs <= 0x280;
             else
                 minPicmip = 2;
+#endif
             if (minPicmip)
             {
                 cappedPicmip = 0;

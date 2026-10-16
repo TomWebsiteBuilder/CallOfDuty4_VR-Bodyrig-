@@ -9,6 +9,7 @@
 #include "vr/vr_grenade_command_edges.h"
 
 void __cdecl CG_NextWeapon_f();
+void __cdecl CG_SelectWeaponIndex(int32_t localClientNum, uint32_t weaponIndex);
 #include <qcommon/mem_track.h>
 #include <qcommon/cmd.h>
 #include <cgame/cg_main.h>
@@ -2072,6 +2073,65 @@ void __cdecl CL_CreateCmd(usercmd_s *result)
             &vrManualFragHeld,
             &vrManualTacticalHeld);
 
+        VR_UpdatePhysicalBodyHolstersAndKnife(
+            vrGrenadeCgameGlob->refdef.vieworg,
+            vrGrenadeCgameGlob->refdef.viewaxis,
+            vrGrenadePlayerState->weapon);
+
+        int targetHolsterSlot = 0;
+        if (VR_ConsumePhysicalHolsterWeaponSwitch(&targetHolsterSlot))
+        {
+            const uint32_t currentWeapon = vrGrenadePlayerState->weapon;
+            int bestCandidate = 0;
+            const int highestWeapIndex = BG_GetNumWeapons() - 1;
+            for (int w = 1; w <= highestWeapIndex; ++w)
+            {
+                if (!Com_BitCheckAssert(vrGrenadePlayerState->weapons, w, 16))
+                    continue;
+
+                const WeaponDef* def = BG_GetWeaponDef(w);
+                if (def == nullptr ||
+                    def->inventoryType == WEAPINVENTORY_ALTMODE ||
+                    def->inventoryType == WEAPINVENTORY_ITEM ||
+                    def->inventoryType == WEAPINVENTORY_OFFHAND)
+                {
+                    continue;
+                }
+
+                if (targetHolsterSlot == 1)
+                {
+                    // Hip Holster: Sidearm (Pistol)
+                    if (def->weapClass == WEAPCLASS_PISTOL)
+                    {
+                        bestCandidate = w;
+                        if (w != static_cast<int>(currentWeapon))
+                        {
+                            break;
+                        }
+                    }
+                }
+                else if (targetHolsterSlot == 2)
+                {
+                    // Shoulder Sling: Primary rifle / heavy weapon
+                    if (def->weapClass != WEAPCLASS_PISTOL)
+                    {
+                        bestCandidate = w;
+                        if (w != static_cast<int>(currentWeapon))
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (bestCandidate > 0 && bestCandidate != static_cast<int>(currentWeapon))
+            {
+                CG_SelectWeaponIndex(0, static_cast<uint32_t>(bestCandidate));
+                Com_Printf(0, "[VR][HOLSTER] Selected %s weapon index %d.\n",
+                    targetHolsterSlot == 1 ? "hip sidearm" : "shoulder sling primary", bestCandidate);
+            }
+        }
+
         vrFragCommandHeld = vrManualFragHeld;
         vrTacticalCommandHeld = vrManualTacticalHeld;
 
@@ -2107,39 +2167,15 @@ void __cdecl CL_CreateCmd(usercmd_s *result)
             }
         }
 
-        // Manual mode frees left Y from its ambiguous hold timer, so weapon
-        // cycling happens immediately on the press edge.  Legacy mode keeps
-        // beta.5's tap-cycle/hold-frag fallback unchanged.
+        // Legacy button-press weapon switching is completely eliminated in
+        // favor of physical hip and shoulder sling holster retention and drawing.
         constexpr int vrFragHoldThresholdMs = 300;
 
         static bool vrLeftYWasHeld = false;
         static bool vrLeftYFragActivated = false;
         static int vrLeftYPressTime = 0;
 
-        if (vrManualGrenadesEnabled)
-        {
-            if (vrLeftYHeld &&
-                !vrLeftYWasHeld)
-            {
-                CG_NextWeapon_f();
-
-                static bool loggedVrImmediateNextWeapon = false;
-
-                if (!loggedVrImmediateNextWeapon)
-                {
-                    Com_Printf(
-                        0,
-                        "[VR][GRENADE] Manual mode freed left Y "
-                        "for immediate next-weapon input.\n");
-
-                    loggedVrImmediateNextWeapon = true;
-                }
-            }
-
-            vrLeftYFragActivated =
-                false;
-        }
-        else
+        if (!vrManualGrenadesEnabled)
         {
             if (vrLeftYHeld &&
                 !vrLeftYWasHeld)
@@ -2166,37 +2202,6 @@ void __cdecl CL_CreateCmd(usercmd_s *result)
                 result->buttons |=
                     BUTTON_FRAG;
                 vrFragCommandHeld = true;
-
-                static bool loggedVrFragHold = false;
-
-                if (!loggedVrFragHold)
-                {
-                    Com_Printf(
-                        0,
-                        "[VR] Bound left Y hold to frag grenade "
-                        "and tap to next weapon.\n");
-
-                    loggedVrFragHold = true;
-                }
-            }
-
-            if (!vrLeftYHeld &&
-                vrLeftYWasHeld &&
-                !vrLeftYFragActivated)
-            {
-                CG_NextWeapon_f();
-
-                static bool loggedVrNextWeaponTap = false;
-
-                if (!loggedVrNextWeaponTap)
-                {
-                    Com_Printf(
-                        0,
-                        "[VR] Bound left Y tap to the existing "
-                        "single-player next-weapon command.\n");
-
-                    loggedVrNextWeaponTap = true;
-                }
             }
         }
 

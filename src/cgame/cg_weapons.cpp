@@ -584,6 +584,67 @@ static VrAirSupportDeviceAsset
     s_vrAirSupportDeviceAssets[
         kVrAirSupportDeviceAssetCapacity] = {};
 
+struct VrBodyHolsterPropRenderObject
+{
+    DObj_s object = {};
+    XModel* model = nullptr;
+    cpose_t pose = {};
+    bool created = false;
+};
+
+static VrBodyHolsterPropRenderObject
+    s_vrHolsteredSidearmObject = {};
+static VrBodyHolsterPropRenderObject
+    s_vrHolsteredPrimaryObject = {};
+static VrBodyHolsterPropRenderObject
+    s_vrHolsteredKnifeObject = {};
+static VrBodyHolsterPropRenderObject
+    s_vrHolsteredSpareMagObject = {};
+static VrBodyHolsterPropRenderObject
+    s_vrHolsteredGrenadeObject = {};
+
+static constexpr int
+    kVrBodyRigAssetCapacity = 8;
+static constexpr uint16_t
+    kVrBodyRigSegmentCount = 13u;
+static constexpr uint16_t
+    kVrBodyRigRingSides = 16u;
+static constexpr uint16_t
+    kVrBodyRigTotalVertices =
+        kVrBodyRigSegmentCount * kVrBodyRigRingSides * 2u;
+static constexpr uint16_t
+    kVrBodyRigTotalTriangles =
+        kVrBodyRigSegmentCount * kVrBodyRigRingSides * 2u;
+
+struct VrBodyRigTorsoAndArmsAsset
+{
+    XModel* sourceModel = nullptr;
+    XModel bodyRigModel = {};
+    XSurface* bodyRigSurfaces = nullptr;
+    GfxPackedVertex* dynamicVertices = nullptr;
+    uint16_t* triangleIndices = nullptr;
+    uint16_t* rigidRootBlends = nullptr;
+    DObjAnimMat* rootBaseMat = nullptr;
+    DObj_s object = {};
+    cpose_t pose = {};
+    GfxPackedVertex templateVertex = {};
+    bool ready = false;
+    bool failed = false;
+    bool objectCreated = false;
+    bool submissionLogWritten = false;
+};
+
+static VrBodyRigTorsoAndArmsAsset
+    s_vrBodyRigAssets[kVrBodyRigAssetCapacity] = {};
+
+static float s_vrLastRenderedLeftWristOrigin[3] = {};
+static float s_vrLastRenderedLeftWristAxis[3][3] = {
+    {1.0f, 0.0f, 0.0f},
+    {0.0f, 1.0f, 0.0f},
+    {0.0f, 0.0f, 1.0f},
+};
+static bool s_vrLastRenderedLeftWristValid = false;
+
 static bool VR_IsStockAirSupportDesignator(
     const WeaponDef* weaponDef)
 {
@@ -1236,7 +1297,9 @@ static bool VR_SelectSplitHandTriangle(
     const uint16_t triangleIndices[3],
     const uint16_t vertexCount,
     const float* leftArmWeights,
-    const float* leftHandWeights)
+    const float* leftHandWeights,
+    const float* rightArmWeights = nullptr,
+    const float* rightHandWeights = nullptr)
 {
     if (triangleIndices == nullptr ||
         leftArmWeights == nullptr ||
@@ -1248,6 +1311,9 @@ static bool VR_SelectSplitHandTriangle(
     float leftArmWeightSum = 0.0f;
     float leftHandWeightSum = 0.0f;
     float maximumLeftHandWeight = 0.0f;
+    float rightArmWeightSum = 0.0f;
+    float rightHandWeightSum = 0.0f;
+    float maximumRightHandWeight = 0.0f;
 
     for (int cornerIndex = 0;
          cornerIndex < 3;
@@ -1273,13 +1339,44 @@ static bool VR_SelectSplitHandTriangle(
             maximumLeftHandWeight =
                 leftHandWeights[vertexIndex];
         }
+
+        if (rightArmWeights != nullptr &&
+            rightHandWeights != nullptr)
+        {
+            rightArmWeightSum +=
+                rightArmWeights[vertexIndex];
+
+            rightHandWeightSum +=
+                rightHandWeights[vertexIndex];
+
+            if (rightHandWeights[vertexIndex] >
+                maximumRightHandWeight)
+            {
+                maximumRightHandWeight =
+                    rightHandWeights[vertexIndex];
+            }
+        }
     }
 
     if (selection == VR_SPLIT_HAND_KEEP_RIGHT)
     {
-        // Left and right geometry are disconnected islands.  Any meaningful
-        // left-shoulder influence therefore identifies a left-side triangle.
-        return leftArmWeightSum < 0.50f;
+        if (leftArmWeightSum >= 0.50f)
+        {
+            return false;
+        }
+
+        if (rightArmWeights != nullptr &&
+            rightHandWeights != nullptr &&
+            rightArmWeightSum >= 0.50f)
+        {
+            // Keep only the right glove + wrist cuff on the weapon viewmodel so
+            // the dynamic 2-bone IK right arm replaces the rigid stock sleeve.
+            return
+                rightHandWeightSum >= 0.60f &&
+                maximumRightHandWeight >= 0.35f;
+        }
+
+        return true;
     }
 
     // Keep the glove plus a small wrist-weighted cuff, but reject the sleeve.
@@ -1296,7 +1393,9 @@ static uint16_t* VR_CreateSplitHandIndexList(
     const float* leftArmWeights,
     const float* leftHandWeights,
     uint16_t* outputTriangleCount,
-    uint32_t* outputVisibleTriangleCount)
+    uint32_t* outputVisibleTriangleCount,
+    const float* rightArmWeights = nullptr,
+    const float* rightHandWeights = nullptr)
 {
     if (sourceSurface.triIndices == nullptr ||
         sourceSurface.triCount == 0u ||
@@ -1318,7 +1417,9 @@ static uint16_t* VR_CreateSplitHandIndexList(
                     triangleIndex * 3u],
                 sourceSurface.vertCount,
                 leftArmWeights,
-                leftHandWeights))
+                leftHandWeights,
+                rightArmWeights,
+                rightHandWeights))
         {
             ++visibleTriangleCount;
         }
@@ -1370,7 +1471,9 @@ static uint16_t* VR_CreateSplitHandIndexList(
                 sourceIndices,
                 sourceSurface.vertCount,
                 leftArmWeights,
-                leftHandWeights))
+                leftHandWeights,
+                rightArmWeights,
+                rightHandWeights))
         {
             continue;
         }
@@ -1809,6 +1912,34 @@ static bool VR_BuildSplitHandModels(
         return false;
     }
 
+    const int rightShoulderIndex =
+        VR_FindModelBoneIndex(
+            sourceModel,
+            "j_shoulder_ri");
+
+    const int rightWristIndex =
+        VR_FindModelBoneIndex(
+            sourceModel,
+            "j_wrist_ri");
+
+    const int rightWristTwistIndex =
+        VR_FindModelBoneIndex(
+            sourceModel,
+            "j_wristtwist_ri");
+
+    const bool rightArmHierarchyReady =
+        rightShoulderIndex >= 0 &&
+        rightWristIndex >= 0 &&
+        rightWristTwistIndex >= 0 &&
+        VR_ModelBoneDescendsFrom(
+            sourceModel,
+            rightWristIndex,
+            rightShoulderIndex) &&
+        VR_ModelBoneDescendsFrom(
+            sourceModel,
+            rightWristTwistIndex,
+            rightShoulderIndex);
+
     XSurface* rightOnlySurfaces =
         reinterpret_cast<XSurface*>(
             Hunk_Alloc(
@@ -1926,7 +2057,7 @@ static bool VR_BuildSplitHandModels(
         const uint32_t temporaryWeightBytes =
             sourceSurface.vertCount *
             sizeof(float) *
-            2u;
+            4u;
 
         float* temporaryWeights =
             reinterpret_cast<float*>(
@@ -1952,6 +2083,14 @@ static bool VR_BuildSplitHandModels(
             &temporaryWeights[
                 sourceSurface.vertCount];
 
+        float* rightArmWeights =
+            &temporaryWeights[
+                sourceSurface.vertCount * 2u];
+
+        float* rightHandWeights =
+            &temporaryWeights[
+                sourceSurface.vertCount * 3u];
+
         const bool weightsValid =
             VR_CalculateSplitHandVertexWeights(
                 sourceModel,
@@ -1961,6 +2100,17 @@ static bool VR_BuildSplitHandModels(
                 leftWristTwistIndex,
                 leftArmWeights,
                 leftHandWeights);
+
+        const bool rightWeightsValid =
+            rightArmHierarchyReady &&
+            VR_CalculateSplitHandVertexWeights(
+                sourceModel,
+                sourceSurface,
+                rightShoulderIndex,
+                rightWristIndex,
+                rightWristTwistIndex,
+                rightArmWeights,
+                rightHandWeights);
 
         if (!weightsValid)
         {
@@ -1990,7 +2140,9 @@ static bool VR_BuildSplitHandModels(
                 leftArmWeights,
                 leftHandWeights,
                 &rightStoredTriangleCount,
-                &rightVisibleTriangleCount);
+                &rightVisibleTriangleCount,
+                rightWeightsValid ? rightArmWeights : nullptr,
+                rightWeightsValid ? rightHandWeights : nullptr);
 
         uint16_t* leftIndices =
             VR_CreateSplitHandIndexList(
@@ -6520,6 +6672,16 @@ static bool VR_AddFloatingLeftHandToScene(
         mutableLightingOrigin,
         0.0f);
 
+    std::memcpy(
+        s_vrLastRenderedLeftWristOrigin,
+        renderedWristOrigin,
+        sizeof(s_vrLastRenderedLeftWristOrigin));
+    QuatToAxis(
+        renderedWristQuaternion,
+        *reinterpret_cast<mat3x3*>(
+            s_vrLastRenderedLeftWristAxis));
+    s_vrLastRenderedLeftWristValid = true;
+
     if (!asset->submittedLogWritten)
     {
         Com_Printf(
@@ -6603,6 +6765,35 @@ static void VR_FreeFloatingLeftHandRenderObjects()
         // hunk-backed and are released with the cgame hunk after shutdown.
         asset = VrHiddenWeaponHandAsset{};
     }
+
+    for (VrBodyRigTorsoAndArmsAsset& asset :
+         s_vrBodyRigAssets)
+    {
+        if (asset.objectCreated)
+        {
+            DObjFree(&asset.object);
+        }
+
+        asset = VrBodyRigTorsoAndArmsAsset{};
+    }
+
+    s_vrLastRenderedLeftWristValid = false;
+}
+
+static void VR_FreeBodyHolsterPropRenderObject(
+    VrBodyHolsterPropRenderObject* propObject)
+{
+    if (propObject == nullptr)
+    {
+        return;
+    }
+
+    if (propObject->created)
+    {
+        DObjFree(&propObject->object);
+    }
+
+    *propObject = VrBodyHolsterPropRenderObject{};
 }
 
 static void VR_FreeManualReloadClipRenderObjects()
@@ -6630,6 +6821,17 @@ static void VR_FreeManualReloadClipRenderObjects()
         grenadeObject =
             VrManualGrenadeRenderObject{};
     }
+
+    VR_FreeBodyHolsterPropRenderObject(
+        &s_vrHolsteredSidearmObject);
+    VR_FreeBodyHolsterPropRenderObject(
+        &s_vrHolsteredPrimaryObject);
+    VR_FreeBodyHolsterPropRenderObject(
+        &s_vrHolsteredKnifeObject);
+    VR_FreeBodyHolsterPropRenderObject(
+        &s_vrHolsteredSpareMagObject);
+    VR_FreeBodyHolsterPropRenderObject(
+        &s_vrHolsteredGrenadeObject);
 }
 
 void VR_FreeManualReloadClipRenderObjectsForShutdown()
@@ -6946,6 +7148,1105 @@ static void VR_AddManualReloadClipModelsToScene(
             0u,
             mutableLightingOrigin,
             0.0f);
+    }
+}
+
+static void VR_SubmitBodyHolsterPropToScene(
+    VrBodyHolsterPropRenderObject* propObject,
+    XModel* model,
+    const float origin[3],
+    const float axis[3][3],
+    const float lightingOrigin[3])
+{
+    if (propObject == nullptr ||
+        model == nullptr ||
+        origin == nullptr ||
+        axis == nullptr ||
+        lightingOrigin == nullptr)
+    {
+        return;
+    }
+
+    if (propObject->created &&
+        propObject->model != model)
+    {
+        DObjFree(&propObject->object);
+        *propObject = VrBodyHolsterPropRenderObject{};
+    }
+
+    if (!propObject->created)
+    {
+        DObjModel_s modelDescription = {};
+        modelDescription.model = model;
+        modelDescription.boneName = 0;
+        modelDescription.ignoreCollision = false;
+
+        DObjCreate(
+            &modelDescription,
+            1u,
+            nullptr,
+            &propObject->object,
+            0);
+
+        propObject->model = model;
+        propObject->created = true;
+        propObject->pose.eType = ET_GENERAL;
+    }
+
+    VR_SetManualReloadClipPose(
+        &propObject->pose,
+        origin,
+        axis);
+
+    float mutableLightingOrigin[3] = {
+        lightingOrigin[0],
+        lightingOrigin[1],
+        lightingOrigin[2],
+    };
+
+    R_AddDObjToSceneUntracked(
+        &propObject->object,
+        &propObject->pose,
+        3u,
+        mutableLightingOrigin,
+        0.0f);
+}
+
+static void VR_SolveClientTwoBoneArmIk(
+    const float shoulderOrigin[3],
+    const float wristOrigin[3],
+    const float poleDirection[3],
+    const float upperArmLength,
+    const float forearmLength,
+    float elbowOriginOut[3])
+{
+    float toWrist[3] = {
+        wristOrigin[0] - shoulderOrigin[0],
+        wristOrigin[1] - shoulderOrigin[1],
+        wristOrigin[2] - shoulderOrigin[2],
+    };
+    float distance = std::sqrt(
+        toWrist[0] * toWrist[0] +
+        toWrist[1] * toWrist[1] +
+        toWrist[2] * toWrist[2]);
+
+    const float minReach = 1.5f;
+    const float maxReach = (upperArmLength + forearmLength) * 0.992f;
+    if (distance < minReach)
+    {
+        toWrist[0] = 0.0f;
+        toWrist[1] = 0.0f;
+        toWrist[2] = -minReach;
+        distance = minReach;
+    }
+
+    float forwardDir[3] = {
+        toWrist[0] / distance,
+        toWrist[1] / distance,
+        toWrist[2] / distance,
+    };
+
+    const float clampedDist =
+        distance < minReach ? minReach : (distance > maxReach ? maxReach : distance);
+    const float rawCos =
+        (upperArmLength * upperArmLength +
+         clampedDist * clampedDist -
+         forearmLength * forearmLength) /
+            (2.0f * upperArmLength * clampedDist);
+    const float cosAngle =
+        rawCos < -1.0f ? -1.0f : (rawCos > 1.0f ? 1.0f : rawCos);
+    const float sinSq = 1.0f - cosAngle * cosAngle;
+    const float sinAngle =
+        std::sqrt(sinSq > 0.0f ? sinSq : 0.0f);
+
+    const float poleDot =
+        poleDirection[0] * forwardDir[0] +
+        poleDirection[1] * forwardDir[1] +
+        poleDirection[2] * forwardDir[2];
+    float bendDir[3] = {
+        poleDirection[0] - poleDot * forwardDir[0],
+        poleDirection[1] - poleDot * forwardDir[1],
+        poleDirection[2] - poleDot * forwardDir[2],
+    };
+    if (!VR_NormalizeModelHandDirection(bendDir))
+    {
+        bendDir[0] = -forwardDir[2];
+        bendDir[1] = 0.0f;
+        bendDir[2] = forwardDir[0];
+        if (!VR_NormalizeModelHandDirection(bendDir))
+        {
+            bendDir[0] = 0.0f;
+            bendDir[1] = 1.0f;
+            bendDir[2] = 0.0f;
+        }
+    }
+
+    for (int i = 0; i < 3; ++i)
+    {
+        elbowOriginOut[i] =
+            shoulderOrigin[i] +
+            forwardDir[i] * (upperArmLength * cosAngle) +
+            bendDir[i] * (upperArmLength * sinAngle);
+    }
+}
+
+static void VR_TransformWorldPointToBodyLocal(
+    const float worldPoint[3],
+    const float bodyOrigin[3],
+    const float bodyAxis[3][3],
+    float localPointOut[3])
+{
+    const float delta[3] = {
+        worldPoint[0] - bodyOrigin[0],
+        worldPoint[1] - bodyOrigin[1],
+        worldPoint[2] - bodyOrigin[2],
+    };
+    for (int row = 0; row < 3; ++row)
+    {
+        localPointOut[row] =
+            delta[0] * bodyAxis[row][0] +
+            delta[1] * bodyAxis[row][1] +
+            delta[2] * bodyAxis[row][2];
+    }
+}
+
+static void VR_WriteBodyRigSegmentPrism(
+    GfxPackedVertex* segmentVertices,
+    const GfxPackedVertex& templateVertex,
+    const float startPos[3],
+    const float endPos[3],
+    const float startRadiusForward,
+    const float startRadiusRight,
+    const float endRadiusForward,
+    const float endRadiusRight)
+{
+    float axisDir[3] = {
+        endPos[0] - startPos[0],
+        endPos[1] - startPos[1],
+        endPos[2] - startPos[2],
+    };
+    if (!VR_NormalizeModelHandDirection(axisDir))
+    {
+        axisDir[0] = 0.0f;
+        axisDir[1] = 0.0f;
+        axisDir[2] = -1.0f;
+    }
+
+    float refForward[3] = {1.0f, 0.0f, 0.0f};
+    if (std::fabs(axisDir[0]) > 0.88f)
+    {
+        refForward[0] = 0.0f;
+        refForward[1] = 0.0f;
+        refForward[2] = 1.0f;
+    }
+
+    float basisRight[3] = {};
+    VR_CrossModelHandDirections(axisDir, refForward, basisRight);
+    if (!VR_NormalizeModelHandDirection(basisRight))
+    {
+        basisRight[0] = 0.0f;
+        basisRight[1] = 1.0f;
+        basisRight[2] = 0.0f;
+    }
+
+    float basisForward[3] = {};
+    VR_CrossModelHandDirections(basisRight, axisDir, basisForward);
+    VR_NormalizeModelHandDirection(basisForward);
+
+    static constexpr float kRingCos[kVrBodyRigRingSides] = {
+        1.0f,
+        0.92387953f,
+        0.70710678f,
+        0.38268343f,
+        0.0f,
+        -0.38268343f,
+        -0.70710678f,
+        -0.92387953f,
+        -1.0f,
+        -0.92387953f,
+        -0.70710678f,
+        -0.38268343f,
+        0.0f,
+        0.38268343f,
+        0.70710678f,
+        0.92387953f,
+    };
+    static constexpr float kRingSin[kVrBodyRigRingSides] = {
+        0.0f,
+        0.38268343f,
+        0.70710678f,
+        0.92387953f,
+        1.0f,
+        0.92387953f,
+        0.70710678f,
+        0.38268343f,
+        0.0f,
+        -0.38268343f,
+        -0.70710678f,
+        -0.92387953f,
+        -1.0f,
+        -0.92387953f,
+        -0.70710678f,
+        -0.38268343f,
+    };
+
+    for (uint16_t side = 0u; side < kVrBodyRigRingSides; ++side)
+    {
+        const float c = kRingCos[side];
+        const float s = kRingSin[side];
+
+        float normal[3] = {
+            c * basisForward[0] + s * basisRight[0],
+            c * basisForward[1] + s * basisRight[1],
+            c * basisForward[2] + s * basisRight[2],
+        };
+        VR_NormalizeModelHandDirection(normal);
+
+        float tangent[3] = {
+            -s * basisForward[0] + c * basisRight[0],
+            -s * basisForward[1] + c * basisRight[1],
+            -s * basisForward[2] + c * basisRight[2],
+        };
+        VR_NormalizeModelHandDirection(tangent);
+
+        const PackedUnitVec packedNormal =
+            Vec3PackUnitVec(normal);
+        const PackedUnitVec packedTangent =
+            Vec3PackUnitVec(tangent);
+
+        GfxPackedVertex& vStart = segmentVertices[side];
+        vStart = templateVertex;
+        vStart.xyz[0] =
+            startPos[0] +
+            c * startRadiusForward * basisForward[0] +
+            s * startRadiusRight * basisRight[0];
+        vStart.xyz[1] =
+            startPos[1] +
+            c * startRadiusForward * basisForward[1] +
+            s * startRadiusRight * basisRight[1];
+        vStart.xyz[2] =
+            startPos[2] +
+            c * startRadiusForward * basisForward[2] +
+            s * startRadiusRight * basisRight[2];
+        vStart.normal = packedNormal;
+        vStart.tangent = packedTangent;
+
+        GfxPackedVertex& vEnd =
+            segmentVertices[kVrBodyRigRingSides + side];
+        vEnd = templateVertex;
+        vEnd.xyz[0] =
+            endPos[0] +
+            c * endRadiusForward * basisForward[0] +
+            s * endRadiusRight * basisRight[0];
+        vEnd.xyz[1] =
+            endPos[1] +
+            c * endRadiusForward * basisForward[1] +
+            s * endRadiusRight * basisRight[1];
+        vEnd.xyz[2] =
+            endPos[2] +
+            c * endRadiusForward * basisForward[2] +
+            s * endRadiusRight * basisRight[2];
+        vEnd.normal = packedNormal;
+        vEnd.tangent = packedTangent;
+    }
+}
+
+static VrBodyRigTorsoAndArmsAsset*
+VR_GetOrCreateBodyRigTorsoAndArmsAsset(
+    XModel* sourceHandModel)
+{
+    if (sourceHandModel == nullptr ||
+        sourceHandModel->numBones == 0u ||
+        sourceHandModel->numsurfs == 0u ||
+        sourceHandModel->surfs == nullptr ||
+        sourceHandModel->surfs[0].verts0 == nullptr ||
+        sourceHandModel->baseMat == nullptr)
+    {
+        return nullptr;
+    }
+
+    for (VrBodyRigTorsoAndArmsAsset& asset : s_vrBodyRigAssets)
+    {
+        if (asset.sourceModel == sourceHandModel)
+        {
+            return asset.ready ? &asset : nullptr;
+        }
+    }
+
+    for (VrBodyRigTorsoAndArmsAsset& asset : s_vrBodyRigAssets)
+    {
+        if (asset.sourceModel != nullptr)
+        {
+            continue;
+        }
+
+        asset.sourceModel = sourceHandModel;
+
+        XSurface* bodySurfaces =
+            reinterpret_cast<XSurface*>(
+                Hunk_Alloc(
+                    sourceHandModel->numsurfs * sizeof(XSurface),
+                    "VR body rig surfaces",
+                    21));
+        GfxPackedVertex* dynamicVertices =
+            reinterpret_cast<GfxPackedVertex*>(
+                Hunk_Alloc(
+                    kVrBodyRigTotalVertices * sizeof(GfxPackedVertex),
+                    "VR body rig vertices",
+                    21));
+        uint16_t* triangleIndices =
+            reinterpret_cast<uint16_t*>(
+                Hunk_Alloc(
+                    kVrBodyRigTotalTriangles * 3u * sizeof(uint16_t),
+                    "VR body rig indices",
+                    21));
+        uint16_t* rigidRootBlends =
+            reinterpret_cast<uint16_t*>(
+                Hunk_Alloc(
+                    kVrBodyRigTotalVertices * sizeof(uint16_t),
+                    "VR body rig blends",
+                    21));
+        DObjAnimMat* rootBaseMat =
+            reinterpret_cast<DObjAnimMat*>(
+                Hunk_Alloc(
+                    sourceHandModel->numBones * sizeof(DObjAnimMat),
+                    "VR body rig root bind",
+                    21));
+
+        if (bodySurfaces == nullptr ||
+            dynamicVertices == nullptr ||
+            triangleIndices == nullptr ||
+            rigidRootBlends == nullptr ||
+            rootBaseMat == nullptr)
+        {
+            asset.failed = true;
+            return nullptr;
+        }
+
+        std::memcpy(
+            bodySurfaces,
+            sourceHandModel->surfs,
+            sourceHandModel->numsurfs * sizeof(XSurface));
+        std::memset(
+            rigidRootBlends,
+            0,
+            kVrBodyRigTotalVertices * sizeof(uint16_t));
+        std::memcpy(
+            rootBaseMat,
+            sourceHandModel->baseMat,
+            sourceHandModel->numBones * sizeof(DObjAnimMat));
+
+        rootBaseMat[0].quat[0] = 0.0f;
+        rootBaseMat[0].quat[1] = 0.0f;
+        rootBaseMat[0].quat[2] = 0.0f;
+        rootBaseMat[0].quat[3] = 1.0f;
+        rootBaseMat[0].trans[0] = 0.0f;
+        rootBaseMat[0].trans[1] = 0.0f;
+        rootBaseMat[0].trans[2] = 0.0f;
+        rootBaseMat[0].transWeight = 2.0f;
+
+        asset.templateVertex =
+            sourceHandModel->surfs[0].verts0[0];
+        asset.templateVertex.binormalSign = 1.0f;
+
+        uint32_t writeIdx = 0u;
+        for (uint16_t seg = 0u; seg < kVrBodyRigSegmentCount; ++seg)
+        {
+            const uint16_t baseVert =
+                seg * kVrBodyRigRingSides * 2u;
+            for (uint16_t side = 0u; side < kVrBodyRigRingSides; ++side)
+            {
+                const uint16_t nextSide =
+                    (side + 1u) % kVrBodyRigRingSides;
+                const uint16_t v00 = baseVert + side;
+                const uint16_t v01 = baseVert + nextSide;
+                const uint16_t v10 = baseVert + kVrBodyRigRingSides + side;
+                const uint16_t v11 = baseVert + kVrBodyRigRingSides + nextSide;
+
+                triangleIndices[writeIdx++] = v00;
+                triangleIndices[writeIdx++] = v10;
+                triangleIndices[writeIdx++] = v01;
+
+                triangleIndices[writeIdx++] = v01;
+                triangleIndices[writeIdx++] = v10;
+                triangleIndices[writeIdx++] = v11;
+            }
+        }
+
+        XSurface& primarySurface = bodySurfaces[0];
+        primarySurface.zoneHandle = kVrRuntimeSplitSurfaceZoneHandle;
+        primarySurface.baseTriIndex = 0u;
+        primarySurface.baseVertIndex = 0u;
+        primarySurface.triIndices = triangleIndices;
+        primarySurface.triCount = kVrBodyRigTotalTriangles;
+        primarySurface.verts0 = dynamicVertices;
+        primarySurface.vertCount = kVrBodyRigTotalVertices;
+        primarySurface.deformed = true;
+        primarySurface.vertInfo.vertCount[0] =
+            static_cast<int16_t>(kVrBodyRigTotalVertices);
+        primarySurface.vertInfo.vertCount[1] = 0;
+        primarySurface.vertInfo.vertCount[2] = 0;
+        primarySurface.vertInfo.vertCount[3] = 0;
+        primarySurface.vertInfo.vertsBlend = rigidRootBlends;
+        primarySurface.vertListCount = 0u;
+        primarySurface.vertList = nullptr;
+        primarySurface.partBits[0] = static_cast<int>(0x80000000u);
+        primarySurface.partBits[1] = 0;
+        primarySurface.partBits[2] = 0;
+        primarySurface.partBits[3] = 0;
+
+        for (int surfIdx = 1; surfIdx < sourceHandModel->numsurfs; ++surfIdx)
+        {
+            uint16_t* degenerateIndices =
+                VR_CreateDegenerateSurfaceIndexList(
+                    sourceHandModel->surfs[surfIdx]);
+            if (degenerateIndices != nullptr)
+            {
+                bodySurfaces[surfIdx].zoneHandle =
+                    kVrRuntimeSplitSurfaceZoneHandle;
+                bodySurfaces[surfIdx].baseTriIndex = 0u;
+                bodySurfaces[surfIdx].triIndices = degenerateIndices;
+                bodySurfaces[surfIdx].triCount = 2u;
+            }
+        }
+
+        asset.bodyRigModel = *sourceHandModel;
+        asset.bodyRigModel.name = sourceHandModel->name;
+        asset.bodyRigModel.surfs = bodySurfaces;
+        asset.bodyRigModel.baseMat = rootBaseMat;
+        for (int lodIndex = 0; lodIndex < 4; ++lodIndex)
+        {
+            asset.bodyRigModel.lodInfo[lodIndex].partBits[0] =
+                static_cast<int>(0x80000000u);
+            asset.bodyRigModel.lodInfo[lodIndex].partBits[1] = 0;
+            asset.bodyRigModel.lodInfo[lodIndex].partBits[2] = 0;
+            asset.bodyRigModel.lodInfo[lodIndex].partBits[3] = 0;
+        }
+        for (int c = 0; c < 3; ++c)
+        {
+            asset.bodyRigModel.mins[c] = -96.0f;
+            asset.bodyRigModel.maxs[c] = 96.0f;
+        }
+        asset.bodyRigModel.radius = 128.0f;
+
+        asset.bodyRigSurfaces = bodySurfaces;
+        asset.dynamicVertices = dynamicVertices;
+        asset.triangleIndices = triangleIndices;
+        asset.rigidRootBlends = rigidRootBlends;
+        asset.rootBaseMat = rootBaseMat;
+        asset.ready = true;
+        return &asset;
+    }
+
+    return nullptr;
+}
+
+// Cgame-side view of the body rig.  The VR runtime exposes its holster and
+// knife transforms through out-parameters; shoulder sockets and fallback
+// wrists are derived here from the level body frame (forward, left, up).
+struct VrBodyRigRenderView
+{
+    bool valid = false;
+    float bodyOrigin[3] = {};
+    float bodyAxis[3][3] = {};
+    float hipHolsterOrigin[3] = {};
+    float hipHolsterAxis[3][3] = {};
+    float chestSlingOrigin[3] = {};
+    float chestSlingAxis[3][3] = {};
+    float knifeSheathOrigin[3] = {};
+    float knifeSheathAxis[3][3] = {};
+    float magPouchOrigin[3] = {};
+    float magPouchAxis[3][3] = {};
+    float grenadePouchOrigin[3] = {};
+    float grenadePouchAxis[3][3] = {};
+    bool knifeDrawn = false;
+    // 1 = knife is in the weapon hand, 0 = knife is in the off hand.
+    int knifeHandIndex = 0;
+    float heldKnifeOrigin[3] = {};
+    float heldKnifeAxis[3][3] = {};
+    float leftShoulder[3] = {};
+    float rightShoulder[3] = {};
+    float leftWrist[3] = {};
+    float rightWrist[3] = {};
+};
+
+static bool VR_QueryBodyRigRenderView(
+    const float cameraOrigin[3],
+    const float cameraAxis[3][3],
+    VrBodyRigRenderView* view)
+{
+    if (cameraOrigin == nullptr ||
+        cameraAxis == nullptr ||
+        view == nullptr)
+    {
+        return false;
+    }
+
+    *view = VrBodyRigRenderView{};
+
+    bool knifeInWeaponHand = false;
+
+    if (!VR_GetPhysicalBodyRigRenderState(
+            cameraOrigin,
+            cameraAxis,
+            view->bodyOrigin,
+            view->bodyAxis,
+            view->hipHolsterOrigin,
+            view->hipHolsterAxis,
+            view->chestSlingOrigin,
+            view->chestSlingAxis,
+            view->knifeSheathOrigin,
+            view->knifeSheathAxis,
+            view->magPouchOrigin,
+            view->magPouchAxis,
+            view->grenadePouchOrigin,
+            view->grenadePouchAxis,
+            &view->knifeDrawn,
+            &knifeInWeaponHand,
+            view->heldKnifeOrigin,
+            view->heldKnifeAxis))
+    {
+        return false;
+    }
+
+    view->knifeHandIndex = knifeInWeaponHand ? 1 : 0;
+
+    // bodyAxis rows are level forward, level left, and world up.  The body
+    // origin sits 7.5 units below the eye, so the shoulder line is just
+    // beneath it.
+    constexpr float kShoulderHalfWidth = 6.5f;
+    constexpr float kShoulderDrop = 1.5f;
+    constexpr float kShoulderBack = 0.5f;
+    constexpr float kRestingArmDrop = 18.0f;
+
+    for (int i = 0; i < 3; ++i)
+    {
+        const float shoulderBase =
+            view->bodyOrigin[i] -
+            view->bodyAxis[0][i] * kShoulderBack -
+            view->bodyAxis[2][i] * kShoulderDrop;
+
+        view->leftShoulder[i] =
+            shoulderBase + view->bodyAxis[1][i] * kShoulderHalfWidth;
+        view->rightShoulder[i] =
+            shoulderBase - view->bodyAxis[1][i] * kShoulderHalfWidth;
+
+        view->leftWrist[i] =
+            view->leftShoulder[i] -
+            view->bodyAxis[2][i] * kRestingArmDrop;
+        view->rightWrist[i] =
+            view->rightShoulder[i] -
+            view->bodyAxis[2][i] * kRestingArmDrop;
+    }
+
+    view->valid = true;
+    return true;
+}
+
+// Set by CG_AddPlayerWeapon each frame; suppresses the gun viewmodel while
+// the physical knife occupies the weapon hand.
+static bool s_vrHideViewmodelForWeaponHandKnife = false;
+
+static void VR_AddPhysicalBodyRigToScene(
+    const uint32_t weaponNum,
+    const WeaponDef* weapDef,
+    DObj_s* weaponViewModel,
+    XModel* sourceHandModel,
+    const cpose_t* weaponPose,
+    const playerState_s* ps,
+    const float cameraOrigin[3],
+    const float cameraAxis[3][3],
+    const float lightingOrigin[3])
+{
+    if (weapDef == nullptr ||
+        ps == nullptr ||
+        lightingOrigin == nullptr)
+    {
+        return;
+    }
+
+    VrBodyRigRenderView bodyState = {};
+    if (!VR_QueryBodyRigRenderView(
+            cameraOrigin,
+            cameraAxis,
+            &bodyState) ||
+        !bodyState.valid)
+    {
+        return;
+    }
+
+    // Resolve the live world-space left and right wrist positions so the
+    // 2-bone IK arms connect seamlessly into the rendered left/right gloves.
+    float leftWristWorld[3] = {
+        bodyState.leftWrist[0],
+        bodyState.leftWrist[1],
+        bodyState.leftWrist[2],
+    };
+    if (s_vrLastRenderedLeftWristValid)
+    {
+        std::memcpy(
+            leftWristWorld,
+            s_vrLastRenderedLeftWristOrigin,
+            sizeof(leftWristWorld));
+    }
+
+    float rightWristWorld[3] = {
+        bodyState.rightWrist[0],
+        bodyState.rightWrist[1],
+        bodyState.rightWrist[2],
+    };
+    if (bodyState.knifeDrawn && bodyState.knifeHandIndex == 1)
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            rightWristWorld[i] =
+                bodyState.heldKnifeOrigin[i] -
+                bodyState.heldKnifeAxis[0][i] * 2.2f;
+        }
+    }
+    else if (weaponViewModel != nullptr && weaponPose != nullptr)
+    {
+        const uint32_t rightWristTag =
+            SL_FindString("j_wrist_ri");
+        float tagAxis[3][3] = {};
+        float tagOrigin[3] = {};
+        if (rightWristTag != 0u &&
+            CG_DObjGetWorldTagMatrix(
+                weaponPose,
+                weaponViewModel,
+                rightWristTag,
+                tagAxis,
+                tagOrigin) != 0)
+        {
+            std::memcpy(
+                rightWristWorld,
+                tagOrigin,
+                sizeof(rightWristWorld));
+        }
+    }
+
+    const float leftPoleDir[3] = {
+        -bodyState.bodyAxis[0][0] * 0.52f +
+            bodyState.bodyAxis[1][0] * 0.65f -
+            bodyState.bodyAxis[2][0] * 0.55f,
+        -bodyState.bodyAxis[0][1] * 0.52f +
+            bodyState.bodyAxis[1][1] * 0.65f -
+            bodyState.bodyAxis[2][1] * 0.55f,
+        -bodyState.bodyAxis[0][2] * 0.52f +
+            bodyState.bodyAxis[1][2] * 0.65f -
+            bodyState.bodyAxis[2][2] * 0.55f,
+    };
+    const float rightPoleDir[3] = {
+        -bodyState.bodyAxis[0][0] * 0.52f -
+            bodyState.bodyAxis[1][0] * 0.65f -
+            bodyState.bodyAxis[2][0] * 0.55f,
+        -bodyState.bodyAxis[0][1] * 0.52f -
+            bodyState.bodyAxis[1][1] * 0.65f -
+            bodyState.bodyAxis[2][1] * 0.55f,
+        -bodyState.bodyAxis[0][2] * 0.52f -
+            bodyState.bodyAxis[1][2] * 0.65f -
+            bodyState.bodyAxis[2][2] * 0.55f,
+    };
+
+    float leftElbowWorld[3] = {};
+    float rightElbowWorld[3] = {};
+    VR_SolveClientTwoBoneArmIk(
+        bodyState.leftShoulder,
+        leftWristWorld,
+        leftPoleDir,
+        10.8f,
+        10.2f,
+        leftElbowWorld);
+    VR_SolveClientTwoBoneArmIk(
+        bodyState.rightShoulder,
+        rightWristWorld,
+        rightPoleDir,
+        10.8f,
+        10.2f,
+        rightElbowWorld);
+
+    // 1. Render the 3D Tactical Torso Vest + 2-Bone IK Left & Right Arms.
+    VrBodyRigTorsoAndArmsAsset* rigAsset =
+        VR_GetOrCreateBodyRigTorsoAndArmsAsset(
+            sourceHandModel != nullptr
+                ? sourceHandModel
+                : s_vrAirSupportStableRightHandDonorModel);
+    if (rigAsset != nullptr)
+    {
+        if (!rigAsset->objectCreated)
+        {
+            DObjModel_s modelDesc = {};
+            modelDesc.model = &rigAsset->bodyRigModel;
+            modelDesc.boneName = 0;
+            modelDesc.ignoreCollision = true;
+            DObjCreate(
+                &modelDesc,
+                1u,
+                nullptr,
+                &rigAsset->object,
+                0);
+            rigAsset->pose.eType = ET_GENERAL;
+            rigAsset->objectCreated = true;
+        }
+
+        float leftShoulderLocal[3] = {};
+        float leftElbowLocal[3] = {};
+        float leftWristLocal[3] = {};
+        float rightShoulderLocal[3] = {};
+        float rightElbowLocal[3] = {};
+        float rightWristLocal[3] = {};
+
+        VR_TransformWorldPointToBodyLocal(
+            bodyState.leftShoulder,
+            bodyState.bodyOrigin,
+            bodyState.bodyAxis,
+            leftShoulderLocal);
+        VR_TransformWorldPointToBodyLocal(
+            leftElbowWorld,
+            bodyState.bodyOrigin,
+            bodyState.bodyAxis,
+            leftElbowLocal);
+        VR_TransformWorldPointToBodyLocal(
+            leftWristWorld,
+            bodyState.bodyOrigin,
+            bodyState.bodyAxis,
+            leftWristLocal);
+        VR_TransformWorldPointToBodyLocal(
+            bodyState.rightShoulder,
+            bodyState.bodyOrigin,
+            bodyState.bodyAxis,
+            rightShoulderLocal);
+        VR_TransformWorldPointToBodyLocal(
+            rightElbowWorld,
+            bodyState.bodyOrigin,
+            bodyState.bodyAxis,
+            rightElbowLocal);
+        VR_TransformWorldPointToBodyLocal(
+            rightWristWorld,
+            bodyState.bodyOrigin,
+            bodyState.bodyAxis,
+            rightWristLocal);
+
+        const float chestTop[3] = {-0.8f, 0.0f, -1.2f};
+        const float chestMid[3] = {-0.6f, 0.0f, -8.5f};
+        const float waistMid[3] = {-0.8f, 0.0f, -14.8f};
+        const float hipBottom[3] = {-1.0f, 0.0f, -19.2f};
+        const float collarLeft[3] = {-0.5f, 3.6f, -0.8f};
+        const float collarRight[3] = {-0.5f, -3.6f, -0.8f};
+        const float molleTop[3] = {2.9f, 0.0f, -2.5f};
+        const float molleBot[3] = {3.2f, 0.0f, -11.8f};
+
+        const float leftElbowPadStart[3] = {
+            leftShoulderLocal[0] * 0.15f + leftElbowLocal[0] * 0.85f,
+            leftShoulderLocal[1] * 0.15f + leftElbowLocal[1] * 0.85f,
+            leftShoulderLocal[2] * 0.15f + leftElbowLocal[2] * 0.85f,
+        };
+        const float leftElbowPadEnd[3] = {
+            leftWristLocal[0] * 0.15f + leftElbowLocal[0] * 0.85f,
+            leftWristLocal[1] * 0.15f + leftElbowLocal[1] * 0.85f,
+            leftWristLocal[2] * 0.15f + leftElbowLocal[2] * 0.85f,
+        };
+        const float leftCuffStart[3] = {
+            leftElbowLocal[0] * 0.14f + leftWristLocal[0] * 0.86f,
+            leftElbowLocal[1] * 0.14f + leftWristLocal[1] * 0.86f,
+            leftElbowLocal[2] * 0.14f + leftWristLocal[2] * 0.86f,
+        };
+
+        const float rightElbowPadStart[3] = {
+            rightShoulderLocal[0] * 0.15f + rightElbowLocal[0] * 0.85f,
+            rightShoulderLocal[1] * 0.15f + rightElbowLocal[1] * 0.85f,
+            rightShoulderLocal[2] * 0.15f + rightElbowLocal[2] * 0.85f,
+        };
+        const float rightElbowPadEnd[3] = {
+            rightWristLocal[0] * 0.15f + rightElbowLocal[0] * 0.85f,
+            rightWristLocal[1] * 0.15f + rightElbowLocal[1] * 0.85f,
+            rightWristLocal[2] * 0.15f + rightElbowLocal[2] * 0.85f,
+        };
+
+        constexpr uint16_t kSegVerts = kVrBodyRigRingSides * 2u;
+        // Torso plate carrier, abdomen cummerbund, tactical belt, shoulder pads, and chest rig
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[0u * kSegVerts],
+            rigAsset->templateVertex,
+            chestTop,
+            chestMid,
+            3.5f,
+            6.8f,
+            3.6f,
+            6.4f);
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[1u * kSegVerts],
+            rigAsset->templateVertex,
+            chestMid,
+            waistMid,
+            3.4f,
+            6.2f,
+            3.2f,
+            5.8f);
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[2u * kSegVerts],
+            rigAsset->templateVertex,
+            waistMid,
+            hipBottom,
+            3.5f,
+            6.3f,
+            3.6f,
+            6.5f);
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[3u * kSegVerts],
+            rigAsset->templateVertex,
+            collarLeft,
+            leftShoulderLocal,
+            2.1f,
+            2.4f,
+            2.5f,
+            2.6f);
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[4u * kSegVerts],
+            rigAsset->templateVertex,
+            collarRight,
+            rightShoulderLocal,
+            2.1f,
+            2.4f,
+            2.5f,
+            2.6f);
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[5u * kSegVerts],
+            rigAsset->templateVertex,
+            molleTop,
+            molleBot,
+            1.15f,
+            4.6f,
+            1.25f,
+            4.4f);
+
+        // Left 2-bone IK arm (upper sleeve, elbow pad, forearm sleeve, wrist cuff)
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[6u * kSegVerts],
+            rigAsset->templateVertex,
+            leftShoulderLocal,
+            leftElbowLocal,
+            2.45f,
+            2.45f,
+            2.05f,
+            2.05f);
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[7u * kSegVerts],
+            rigAsset->templateVertex,
+            leftElbowPadStart,
+            leftElbowPadEnd,
+            2.22f,
+            2.22f,
+            2.22f,
+            2.22f);
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[8u * kSegVerts],
+            rigAsset->templateVertex,
+            leftElbowLocal,
+            leftWristLocal,
+            2.08f,
+            2.08f,
+            1.48f,
+            1.48f);
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[9u * kSegVerts],
+            rigAsset->templateVertex,
+            leftCuffStart,
+            leftWristLocal,
+            1.62f,
+            1.62f,
+            1.58f,
+            1.58f);
+
+        // Right 2-bone IK arm (upper sleeve, elbow pad, forearm sleeve)
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[10u * kSegVerts],
+            rigAsset->templateVertex,
+            rightShoulderLocal,
+            rightElbowLocal,
+            2.45f,
+            2.45f,
+            2.05f,
+            2.05f);
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[11u * kSegVerts],
+            rigAsset->templateVertex,
+            rightElbowPadStart,
+            rightElbowPadEnd,
+            2.22f,
+            2.22f,
+            2.22f,
+            2.22f);
+        const float rightForearmCuffTerminus[3] = {
+            rightElbowLocal[0] * 0.08f + rightWristLocal[0] * 0.92f,
+            rightElbowLocal[1] * 0.08f + rightWristLocal[1] * 0.92f,
+            rightElbowLocal[2] * 0.08f + rightWristLocal[2] * 0.92f,
+        };
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[12u * kSegVerts],
+            rigAsset->templateVertex,
+            rightElbowLocal,
+            rightForearmCuffTerminus,
+            2.08f,
+            2.08f,
+            1.32f,
+            1.32f);
+
+        float bodyQuat[4] = {};
+        float normBodyQuat[4] = {};
+        AxisToQuat(bodyState.bodyAxis, bodyQuat);
+        if (VR_NormalizeHandQuaternion(bodyQuat, normBodyQuat) &&
+            VR_SetRigidHandRootPose(
+                &rigAsset->object,
+                &rigAsset->pose,
+                bodyState.bodyOrigin,
+                normBodyQuat))
+        {
+            float mutableLightingOrigin[3] = {
+                lightingOrigin[0],
+                lightingOrigin[1],
+                lightingOrigin[2],
+            };
+            R_AddDObjToSceneUntracked(
+                &rigAsset->object,
+                &rigAsset->pose,
+                3u,
+                mutableLightingOrigin,
+                0.0f);
+
+            if (!rigAsset->submissionLogWritten)
+            {
+                Com_Printf(
+                    0,
+                    "[VR][BODYRIG] Submitted 3D tactical torso vest and "
+                    "dual 2-bone IK arms (%u vertices, %u triangles).\n",
+                    kVrBodyRigTotalVertices,
+                    kVrBodyRigTotalTriangles);
+                rigAsset->submissionLogWritten = true;
+            }
+        }
+    }
+
+    // 2. Render Holstered Secondary (Right Hip) and Stowed Primary (Chest Sling).
+    XModel* holsteredSidearmModel = nullptr;
+    XModel* holsteredPrimaryModel = nullptr;
+
+    const uint32_t totalWeapons = BG_GetNumWeapons();
+    for (uint32_t candidateIndex = 1u;
+         candidateIndex < totalWeapons;
+         ++candidateIndex)
+    {
+        if (candidateIndex == weaponNum &&
+            !(bodyState.knifeDrawn && bodyState.knifeHandIndex == 1))
+        {
+            continue;
+        }
+
+        if (!Com_BitCheckAssert(ps->weapons, candidateIndex, 16))
+        {
+            continue;
+        }
+
+        const WeaponDef* candidateDef = BG_GetWeaponDef(candidateIndex);
+        if (candidateDef == nullptr ||
+            candidateDef->inventoryType == WEAPINVENTORY_ALTMODE ||
+            candidateDef->inventoryType == WEAPINVENTORY_ITEM ||
+            candidateDef->inventoryType == WEAPINVENTORY_OFFHAND)
+        {
+            continue;
+        }
+
+        XModel* candidateModel =
+            candidateDef->worldModel[0] != nullptr
+                ? candidateDef->worldModel[0]
+                : candidateDef->gunXModel[0];
+        if (candidateModel == nullptr)
+        {
+            continue;
+        }
+
+        if (candidateDef->weapClass == WEAPCLASS_PISTOL &&
+            holsteredSidearmModel == nullptr)
+        {
+            holsteredSidearmModel = candidateModel;
+        }
+        else if (holsteredPrimaryModel == nullptr)
+        {
+            holsteredPrimaryModel = candidateModel;
+        }
+    }
+
+    if (holsteredSidearmModel != nullptr)
+    {
+        VR_SubmitBodyHolsterPropToScene(
+            &s_vrHolsteredSidearmObject,
+            holsteredSidearmModel,
+            bodyState.hipHolsterOrigin,
+            bodyState.hipHolsterAxis,
+            lightingOrigin);
+    }
+
+    if (holsteredPrimaryModel != nullptr)
+    {
+        VR_SubmitBodyHolsterPropToScene(
+            &s_vrHolsteredPrimaryObject,
+            holsteredPrimaryModel,
+            bodyState.chestSlingOrigin,
+            bodyState.chestSlingAxis,
+            lightingOrigin);
+    }
+
+    // 3. Render Physical Combat Knife (in active 6DoF hand when drawn, or in
+    // the chest sheath when stowed).
+    if (weapDef->knifeModel != nullptr)
+    {
+        VR_SubmitBodyHolsterPropToScene(
+            &s_vrHolsteredKnifeObject,
+            weapDef->knifeModel,
+            bodyState.knifeDrawn
+                ? bodyState.heldKnifeOrigin
+                : bodyState.knifeSheathOrigin,
+            bodyState.knifeDrawn
+                ? bodyState.heldKnifeAxis
+                : bodyState.knifeSheathAxis,
+            lightingOrigin);
+    }
+
+    // 4. Render Spare Magazine in the Hip Magazine Pouch.
+    const int ammoIndex = BG_AmmoForWeapon(weaponNum);
+    if (weapDef->worldClipModel != nullptr &&
+        ammoIndex >= 0 &&
+        ps->ammo[ammoIndex] > 0)
+    {
+        VR_SubmitBodyHolsterPropToScene(
+            &s_vrHolsteredSpareMagObject,
+            weapDef->worldClipModel,
+            bodyState.magPouchOrigin,
+            bodyState.magPouchAxis,
+            lightingOrigin);
+    }
+
+    // 5. Render Frag Grenade on the Belt Pouch.
+    const int equippedOffhand =
+        BG_GetFirstEquippedOffhand(ps, OFFHAND_CLASS_FRAG_GRENADE);
+    if (equippedOffhand > 0)
+    {
+        const WeaponDef* offhandDef = BG_GetWeaponDef(equippedOffhand);
+        XModel* grenadeModel =
+            offhandDef != nullptr
+                ? (offhandDef->projectileModel != nullptr
+                       ? offhandDef->projectileModel
+                       : offhandDef->worldModel[0])
+                : nullptr;
+        if (grenadeModel != nullptr)
+        {
+            VR_SubmitBodyHolsterPropToScene(
+                &s_vrHolsteredGrenadeObject,
+                grenadeModel,
+                bodyState.grenadePouchOrigin,
+                bodyState.grenadePouchAxis,
+                lightingOrigin);
+        }
     }
 }
 #endif
@@ -8072,6 +9373,73 @@ void __cdecl CG_AddPlayerWeapon(
                     }
                 }
 
+                const uint32_t boltTagCandidates[] = {
+                    SL_FindString("j_bolt"),
+                    SL_FindString("tag_bolt"),
+                    SL_FindString("j_slide"),
+                    SL_FindString("j_charging_handle"),
+                    scr_const.tag_brass,
+                };
+
+                float boltAnchorOrigin[3] = {};
+                float boltAnchorAxis[3][3] = {
+                    {1.0f, 0.0f, 0.0f},
+                    {0.0f, 1.0f, 0.0f},
+                    {0.0f, 0.0f, 1.0f},
+                };
+                bool foundBoltAnchor = false;
+
+                if (detachableMagazineWeapon)
+                {
+                    for (const uint32_t boltTag : boltTagCandidates)
+                    {
+                        if (boltTag == 0u)
+                        {
+                            continue;
+                        }
+
+                        uint8_t candidateBoltBoneIndex = 0u;
+                        if (DObjGetBoneIndex(
+                                weapInfo->viewModelDObj,
+                                boltTag,
+                                &candidateBoltBoneIndex) &&
+                            CG_DObjGetWorldTagMatrix(
+                                &cgameGlob->viewModelPose,
+                                weapInfo->viewModelDObj,
+                                boltTag,
+                                boltAnchorAxis,
+                                boltAnchorOrigin))
+                        {
+                            foundBoltAnchor = true;
+                            break;
+                        }
+                    }
+
+                    if (!foundBoltAnchor && foundMagazineWell)
+                    {
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            boltAnchorOrigin[c] =
+                                magazineWellOrigin[c] -
+                                magazineWellAxis[0][c] * 1.8f +
+                                magazineWellAxis[2][c] * 3.2f;
+                        }
+                        std::memcpy(
+                            boltAnchorAxis,
+                            magazineWellAxis,
+                            sizeof(boltAnchorAxis));
+                        foundBoltAnchor = true;
+                    }
+                }
+
+                if (detachableMagazineWeapon && foundBoltAnchor)
+                {
+                    VR_PublishWeaponBoltAnchorWorld(
+                        static_cast<int>(weaponNum),
+                        boltAnchorOrigin,
+                        boltAnchorAxis);
+                }
+
                 const int clipIndex =
                     BG_ClipForWeapon(weaponNum);
 
@@ -8113,6 +9481,72 @@ void __cdecl CG_AddPlayerWeapon(
                     heldOrigin,
                     heldAxis);
 
+                bool needsBoltRack = false;
+                bool rackingBolt = false;
+                float boltPullFraction = 0.0f;
+                float boltHandOrigin[3] = {};
+                float boltHandAxis[3][3] = {};
+
+                VR_GetManualReloadBoltRackState(
+                    static_cast<int>(weaponNum),
+                    &needsBoltRack,
+                    &rackingBolt,
+                    &boltPullFraction,
+                    boltHandOrigin,
+                    boltHandAxis);
+
+                VrBodyRigRenderView bodyRigState = {};
+                const bool bodyRigValid =
+                    VR_QueryBodyRigRenderView(
+                        cgameGlob->refdef.vieworg,
+                        cgameGlob->refdef.viewaxis,
+                        &bodyRigState);
+
+                s_vrHideViewmodelForWeaponHandKnife =
+                    bodyRigValid &&
+                    bodyRigState.knifeDrawn &&
+                    bodyRigState.knifeHandIndex == 1;
+
+                bool leftHandGrippingHeldObject = drawHeldMagazine;
+                float leftHandHeldOrigin[3] = {
+                    heldOrigin[0],
+                    heldOrigin[1],
+                    heldOrigin[2],
+                };
+                float leftHandHeldAxis[3][3] = {};
+                std::memcpy(
+                    leftHandHeldAxis,
+                    heldAxis,
+                    sizeof(leftHandHeldAxis));
+
+                if (!leftHandGrippingHeldObject && rackingBolt)
+                {
+                    leftHandGrippingHeldObject = true;
+                    std::memcpy(
+                        leftHandHeldOrigin,
+                        boltHandOrigin,
+                        sizeof(leftHandHeldOrigin));
+                    std::memcpy(
+                        leftHandHeldAxis,
+                        boltHandAxis,
+                        sizeof(leftHandHeldAxis));
+                }
+                else if (!leftHandGrippingHeldObject &&
+                         bodyRigValid &&
+                         bodyRigState.knifeDrawn &&
+                         bodyRigState.knifeHandIndex == 0)
+                {
+                    leftHandGrippingHeldObject = true;
+                    std::memcpy(
+                        leftHandHeldOrigin,
+                        bodyRigState.heldKnifeOrigin,
+                        sizeof(leftHandHeldOrigin));
+                    std::memcpy(
+                        leftHandHeldAxis,
+                        bodyRigState.heldKnifeAxis,
+                        sizeof(leftHandHeldAxis));
+                }
+
                 const float floatingHandLightingOrigin[3] = {
                     ps->origin[0],
                     ps->origin[1],
@@ -8134,9 +9568,9 @@ void __cdecl CG_AddPlayerWeapon(
                         cgameGlob->refdef.vieworg,
                         cgameGlob->refdef.viewaxis,
                         floatingHandLightingOrigin,
-                        drawHeldMagazine,
-                        heldOrigin,
-                        heldAxis);
+                        leftHandGrippingHeldObject,
+                        leftHandHeldOrigin,
+                        leftHandHeldAxis);
 
                 const bool airSupportDeviceRendered =
                     VR_AddAirSupportDeviceToScene(
@@ -8195,6 +9629,17 @@ void __cdecl CG_AddPlayerWeapon(
                 VR_AddManualGrenadeModelToScene(
                     manualReloadLightingOrigin);
 
+                VR_AddPhysicalBodyRigToScene(
+                    weaponNum,
+                    weapDef,
+                    weapInfo->viewModelDObj,
+                    weapInfo->handModel,
+                    &cgameGlob->viewModelPose,
+                    ps,
+                    cgameGlob->refdef.vieworg,
+                    cgameGlob->refdef.viewaxis,
+                    manualReloadLightingOrigin);
+
                 static bool loggedManualReloadSupport = false;
 
                 if (detachableMagazineWeapon &&
@@ -8204,7 +9649,8 @@ void __cdecl CG_AddPlayerWeapon(
                     Com_Printf(
                         0,
                         "[VR][RELOAD] Weapon %u supports physical "
-                        "magazine ejection, hip draw, and insertion.\n",
+                        "magazine ejection, hip draw, insertion, and "
+                        "bolt/charging-handle racking.\n",
                         weaponNum);
 
                     loggedManualReloadSupport = true;
@@ -8216,6 +9662,8 @@ void __cdecl CG_AddPlayerWeapon(
             if (bDrawGun
 #ifdef KISAK_SP
                 && !deferPhysicalScopeViewWeapon
+                && !(VR_IsPhysicalKnifeHeld() &&
+                     s_vrHideViewmodelForWeaponHandKnife)
 #endif
                 )
             {
@@ -8909,6 +10357,11 @@ bool __cdecl ViewmodelKnifeShouldBeAttached(int32_t localClientNum, WeaponDef* w
 
     if (!weapDef->knifeModel)
         return 0;
+
+#ifdef KISAK_SP
+    if (VR_IsPhysicalKnifeHeld())
+        return 0;
+#endif
 
     anim = CG_GetLocalClientGlobals(localClientNum)->predictedPlayerState.weapAnim & 0xFFFFFDFF;
     return anim == 8 || anim == 9;

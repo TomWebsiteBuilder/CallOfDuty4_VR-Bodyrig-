@@ -583,7 +583,11 @@
      minb.value.min = 0.0f;
      r_lodScaleRigid = Dvar_RegisterFloat(
          "r_lodScaleRigid",
+#ifdef KISAK_SP
+         0.8f,
+#else
          1.0f,
+#endif
          minb,
          DVAR_ARCHIVE,
          "Scale the level of detail distance for rigid models (larger reduces detail)");
@@ -591,7 +595,11 @@
      minc.value.min = -FLT_MAX;
      r_lodBiasRigid = Dvar_RegisterFloat(
          "r_lodBiasRigid",
+#ifdef KISAK_SP
+         -30.0f,
+#else
          0.0f,
+#endif
          minc,
          DVAR_ARCHIVE,
          "Bias the level of detail distance for rigid models (negative increases detail)");
@@ -599,7 +607,11 @@
      mind.value.min = 0.0f;
      r_lodScaleSkinned = Dvar_RegisterFloat(
          "r_lodScaleSkinned",
+#ifdef KISAK_SP
+         0.8f,
+#else
          1.0f,
+#endif
          mind,
          DVAR_ARCHIVE,
          "Scale the level of detail distance for skinned models (larger reduces detail)");
@@ -607,7 +619,11 @@
      mine.value.min = -FLT_MAX;
      r_lodBiasSkinned = Dvar_RegisterFloat(
          "r_lodBiasSkinned",
+#ifdef KISAK_SP
+         -30.0f,
+#else
          0.0f,
+#endif
          mine,
          DVAR_ARCHIVE,
          "Bias the level of detail distance for skinned models (negative increases detail)");

@@ -509,3 +509,74 @@ void VR_SetRightControllerWeaponMuzzleBlocked(
     bool blocked);
 
 bool VR_ShouldSuppressRightControllerBlockedMuzzleShot();
+
+// KISAK_SP_VR_EXPERIMENTAL_BODYRIG_V1
+// Publishes the current weapon's world-space bolt/charging-handle/slide anchor
+// so manual magazine reloads can require physical off-hand bolt racking.
+void VR_PublishWeaponBoltAnchorWorld(
+    int weaponIndex,
+    const float boltOrigin[3],
+    const float boltAxis[3][3]);
+
+// Returns the active manual bolt-rack reload state so cgame can animate the
+// weapon's bolt bone and attach the off-hand glove while racking.
+bool VR_GetManualReloadBoltRackState(
+    int weaponIndex,
+    bool* needsBoltRack,
+    bool* rackingBolt,
+    float* boltPullFraction,
+    float boltHandOrigin[3],
+    float boltHandAxis[3][3]);
+
+// Updates body-relative physical holsters (hip sidearm holster, chest/shoulder
+// primary sling, chest combat-knife sheath) and 6DoF physical knife slash/stab
+// detection using the current camera/body pose.
+void VR_UpdatePhysicalBodyHolstersAndKnife(
+    const float cameraOrigin[3],
+    const float cameraAxis[3][3],
+    int activeWeaponIndex);
+
+// Returns true once on the frame a physical holster grab/stow requests a
+// weapon switch in CL_CreateCmd. If targetSlot is non-null, receives 1 for
+// hip sidearm holster or 2 for chest/shoulder primary sling.
+bool VR_ConsumePhysicalHolsterWeaponSwitch(int* targetSlot = nullptr);
+
+// True while the physical combat knife is drawn from its body sheath into
+// either hand. Suppresses COD4's flat-screen canned viewmodel lunge animation.
+bool VR_IsPhysicalKnifeHeld();
+
+// Returns world-space transforms for the body rig's holsters (hip sidearm,
+// chest primary sling, chest knife sheath, hip mag pouch, belt grenade) plus
+// the drawn physical combat knife pose when held in either hand.
+bool VR_GetPhysicalBodyRigRenderState(
+    const float cameraOrigin[3],
+    const float cameraAxis[3][3],
+    float bodyOrigin[3],
+    float bodyAxis[3][3],
+    float hipHolsterOrigin[3],
+    float hipHolsterAxis[3][3],
+    float chestSlingOrigin[3],
+    float chestSlingAxis[3][3],
+    float knifeSheathOrigin[3],
+    float knifeSheathAxis[3][3],
+    float magPouchOrigin[3],
+    float magPouchAxis[3][3],
+    float grenadePouchOrigin[3],
+    float grenadePouchAxis[3][3],
+    bool* knifeDrawn,
+    bool* knifeInWeaponHand,
+    float heldKnifeOrigin[3],
+    float heldKnifeAxis[3][3]);
+
+// Returns the authoritative world-space origin and blade/swing direction when
+// a physical 6DoF combat knife slash/stab triggers FireWeaponMelee.
+bool VR_GetPhysicalKnifeStrikeWorld(
+    float strikeOrigin[3],
+    float strikeForward[3],
+    float strikeRight[3],
+    float strikeUp[3]);
+
+// Applies tactile blade impact haptics to whichever controller currently holds
+// the physical combat knife.
+void VR_NotifyPhysicalKnifeHit(bool hitSolidOrFlesh);
+

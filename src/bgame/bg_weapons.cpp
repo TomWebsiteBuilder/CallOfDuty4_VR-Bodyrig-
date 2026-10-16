@@ -2969,7 +2969,12 @@ void __cdecl PM_Weapon_CheckForMelee(pmove_t *pm, int32_t delayedAction)
         weaponstate = ps->weaponstate;
         if (weaponstate <= 0 || weaponstate > 4)
         {
-            PM_MeleeChargeStart(pm);
+#ifdef KISAK_SP
+            if (!VR_IsPhysicalKnifeHeld())
+#endif
+            {
+                PM_MeleeChargeStart(pm);
+            }
             PM_Weapon_MeleeInit(ps);
         }
     }
@@ -2983,6 +2988,17 @@ void __cdecl PM_Weapon_MeleeInit(playerState_s *ps)
     iassert(ps);
 
     weapDef = BG_GetWeaponDef(ps->weapon);
+#ifdef KISAK_SP
+    if (VR_IsPhysicalKnifeHeld())
+    {
+        ps->weaponTime = 160;
+        ps->weaponDelay = 12;
+        ps->weaponstate = WEAPON_MELEE_INIT;
+        PM_AddEvent(ps, EV_MELEE_SWIPE);
+        PM_SetProneMovementOverride(ps);
+        return;
+    }
+#endif
     v1 = (ps->pm_flags & PMF_MELEE_CHARGE) != 0 && PM_WeaponHasChargeMelee(ps);
     if (v1)
     {

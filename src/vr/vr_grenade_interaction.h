@@ -197,15 +197,23 @@ inline GripUpdate UpdateGrip(
         result.grabPressed = pressed && poseValid;
         return result;
     }
-    if (inputAvailable && !held && !state->releasePending)
+    constexpr std::uint32_t kGrabStickinessThresholdMs = 120u;
+    if (inputAvailable && held)
+    {
+        // Re-gripped within stickiness debounce window: cancel pending release.
+        state->releasePending = false;
+    }
+    else if (inputAvailable && !held && !state->releasePending)
     {
         state->releasePending = true;
         state->releasedAt = nowMilliseconds;
     }
     constexpr std::uint32_t maximumReleasePoseWaitMilliseconds = 150u;
     if (state->releasePending &&
+        nowMilliseconds - state->releasedAt >= kGrabStickinessThresholdMs &&
         (poseValid || nowMilliseconds - state->releasedAt >=
-                          maximumReleasePoseWaitMilliseconds))
+                          kGrabStickinessThresholdMs +
+                              maximumReleasePoseWaitMilliseconds))
     {
         result.release = true;
         result.lastValidPoseFallback = !poseValid;

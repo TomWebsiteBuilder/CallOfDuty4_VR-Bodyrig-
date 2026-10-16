@@ -185,6 +185,12 @@ gentity_s *__cdecl Weapon_Melee_internal(gentity_s *ent, weaponParms *wp, float 
     damage = wp->weapDef->iMeleeDamage;
     if (!Melee_Trace(ent, wp, damage, range, width, height, &tr, endpos))
         return 0;
+#ifdef KISAK_SP
+    if (ent->client)
+    {
+        VR_NotifyPhysicalKnifeHit(true);
+    }
+#endif
     hitEntId = Trace_GetEntityHitId(&tr);
     traceEnt = &g_entities[hitEntId];
 
@@ -1435,11 +1441,25 @@ void __cdecl FireWeaponMelee(gentity_s *ent, int gametime)
 #ifdef KISAK_SP
         // The normal SP melee path traces from ps.viewangles, but the HMD
         // and tracked weapon do not directly modify those body angles.
-        // Reuse the same authoritative tracked origin/direction already
-        // used for firearm shots so melee follows the visible right hand.
-        CalcMuzzlePoints(
-            ent,
-            &wp);
+        // If the physical VR combat knife is held/slashing, trace directly
+        // from the physical blade pose and swing direction; otherwise reuse
+        // the authoritative tracked firearm origin/direction.
+        if (VR_GetPhysicalKnifeStrikeWorld(
+                wp.muzzleTrace,
+                wp.forward,
+                wp.right,
+                wp.up))
+        {
+            VR_ClampManualGrenadeStart(
+                ent,
+                wp.muzzleTrace);
+        }
+        else
+        {
+            CalcMuzzlePoints(
+                ent,
+                &wp);
+        }
 
         static bool loggedVrTrackedMeleeTrace = false;
 
