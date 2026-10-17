@@ -1475,7 +1475,8 @@ void VR_DrawWristAmmoCounter(const int localClientNum)
     float screenPos[2] = {};
     bool anchoredToWrist = false;
 
-    if (VR_GetRenderedLeftWristWorldPose(wristWorld, wristAxis))
+    if (VR_GetRenderedLeftWristWorldPose(wristWorld, wristAxis) ||
+        VR_GetLeftControllerGripWorld(cgArray[localClientNum].refdef.vieworg, cgArray[localClientNum].refdef.viewaxis, wristWorld, wristAxis))
     {
         const float dorsalTarget[3] = {
             wristWorld[0] + wristAxis[2][0] * 1.5f,

@@ -216,6 +216,12 @@ bool VR_GetRightControllerGripWorld(
     float gripWorld[3],
     float gripAxisWorld[3][3]);
 
+bool VR_GetLeftControllerGripWorld(
+    const float cameraOrigin[3],
+    const float cameraAxis[3][3],
+    float gripWorld[3],
+    float gripAxisWorld[3][3]);
+
 // Records proof that the final viewmodel grip-tag alignment reached the
 // calibrated target. This is called only after the corrected pose is rebuilt.
 void VR_ReportRightControllerWeaponGripAlignment(
@@ -672,6 +678,7 @@ bool VR_IsHoldToGripEnabled();
 void VR_ToggleHoldToGrip();
 bool VR_IsPhysicalWeaponHolstered();
 bool VR_IsRightControllerGripHeld();
+bool VR_IsLeftControllerGripHeld();
 
 // -------------------------------------------------------------------------
 // 3D Menu Laser Pointer & Selection

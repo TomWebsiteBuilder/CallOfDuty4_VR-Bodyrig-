@@ -3799,7 +3799,14 @@ float3 VR_Render3DVolumetricSmokeMenu(float2 pixelPos, float2 inputUv)
     const float3 ambientSmoke = lerp(smokeBase, lerp(smokeEmerald, smokeAmber, billow * 0.42f), totalSmoke * 0.88f);
 
     // Static floating world menu quad (layer is latched in world space by compositor)
-    const float3 rayRel = rayEye;
+    float3 rayRel = rayEye;
+    if (dot(vrHeadRelRotRow0.xyz, vrHeadRelRotRow0.xyz) > 0.5f)
+    {
+        rayRel = float3(
+            dot(vrHeadRelRotRow0.xyz, rayEye),
+            dot(vrHeadRelRotRow1.xyz, rayEye),
+            dot(vrHeadRelRotRow2.xyz, rayEye));
+    }
     float3 finalColor = ambientSmoke;
     if (rayRel.z > 0.25f)
     {
@@ -3847,7 +3854,14 @@ float3 VR_Render3DVirtualTheaterCutscene(float2 pixelPos, float2 inputUv)
     const float2 p = roomUv * float2(aspect, 1.0f);
     const float3 rayEye = normalize(float3(p.x, -p.y, 1.48f));
 
-    const float3 rayRel = rayEye;
+    float3 rayRel = rayEye;
+    if (dot(vrHeadRelRotRow0.xyz, vrHeadRelRotRow0.xyz) > 0.5f)
+    {
+        rayRel = float3(
+            dot(vrHeadRelRotRow0.xyz, rayEye),
+            dot(vrHeadRelRotRow1.xyz, rayEye),
+            dot(vrHeadRelRotRow2.xyz, rayEye));
+    }
     const float3 theaterBase = float3(0.012f, 0.014f, 0.018f);
     float3 finalColor = theaterBase;
 
@@ -15771,7 +15785,7 @@ bool VR_RenderSolidColorFrame(
                 XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW
             };
 
-        if (s_staticWorldCanvasActive)
+        if (s_staticWorldCanvasActive && !isSpatialEnvironment)
         {
             projectionView.pose =
                 s_latchedStaticCanvasPose[eyeIndex];
@@ -16731,6 +16745,60 @@ bool VR_GetRightControllerGripWorld(
 
         std::memcpy(gripLocal, g_vrRightControllerWeaponPosition, sizeof(gripLocal));
         std::memcpy(gripAxisLocal, g_vrRightControllerGripAxis, sizeof(gripAxisLocal));
+    }
+
+    if (gripWorld != nullptr)
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            gripWorld[i] = cameraOrigin[i] +
+                gripLocal[0] * cameraAxis[0][i] +
+                gripLocal[1] * cameraAxis[1][i] +
+                gripLocal[2] * cameraAxis[2][i];
+        }
+    }
+
+    if (gripAxisWorld != nullptr)
+    {
+        for (int r = 0; r < 3; ++r)
+        {
+            for (int c = 0; c < 3; ++c)
+            {
+                gripAxisWorld[r][c] =
+                    gripAxisLocal[r][0] * cameraAxis[0][c] +
+                    gripAxisLocal[r][1] * cameraAxis[1][c] +
+                    gripAxisLocal[r][2] * cameraAxis[2][c];
+            }
+        }
+    }
+
+    return true;
+}
+
+
+bool VR_GetLeftControllerGripWorld(
+    const float cameraOrigin[3],
+    const float cameraAxis[3][3],
+    float gripWorld[3],
+    float gripAxisWorld[3][3])
+{
+    if (cameraOrigin == nullptr || cameraAxis == nullptr)
+    {
+        return false;
+    }
+
+    float gripLocal[3] = {};
+    float gripAxisLocal[3][3] = {};
+
+    {
+        std::lock_guard<std::mutex> lock(g_vrWeaponControllerPoseMutex);
+        if (!g_vrLeftControllerForegripPoseValid)
+        {
+            return false;
+        }
+
+        std::memcpy(gripLocal, g_vrLeftControllerForegripPosition, sizeof(gripLocal));
+        std::memcpy(gripAxisLocal, g_vrLeftControllerForegripAxis, sizeof(gripAxisLocal));
     }
 
     if (gripWorld != nullptr)
@@ -28875,6 +28943,11 @@ bool VR_IsPhysicalWeaponHolstered()
 bool VR_IsRightControllerGripHeld()
 {
     return g_vrRightControllerSqueezePressedRaw;
+}
+
+bool VR_IsLeftControllerGripHeld()
+{
+    return g_vrLeftControllerSqueezePressedRaw;
 }
 
 // -------------------------------------------------------------------------

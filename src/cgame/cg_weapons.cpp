@@ -915,6 +915,123 @@ static XModel* VR_ResolveFactionCharacterModel(const VrPlayerFaction faction)
     return nullptr;
 }
 
+static XModel* VR_ResolveFactionViewhandsModel(const VrPlayerFaction faction)
+{
+    const char* const* candidates = nullptr;
+    size_t candidateCount = 0u;
+
+    static const char* const kGhillieViewhands[] = {
+        "viewhands_marine_sniper",
+        "viewhands_player_usmc",
+        "viewmodel_base_viewhands",
+    };
+
+    static const char* const kOpForViewhands[] = {
+        "viewhands_op_force",
+        "viewhands_sas_woodland",
+        "viewhands_player_sas_woodland",
+    };
+
+    static const char* const kSasNightVisionViewhands[] = {
+        "viewhands_sas_woodland",
+        "viewhands_player_sas_woodland",
+        "viewhands_black_kit",
+    };
+
+    static const char* const kUsmcViewhands[] = {
+        "viewhands_player_usmc",
+        "viewmodel_base_viewhands",
+        "viewhands_usmc",
+    };
+
+    static const char* const kSasUrbanViewhands[] = {
+        "viewhands_black_kit",
+        "viewhands_player_blackkit",
+        "viewhands_sas_urban",
+    };
+
+    static const char* const kSasWoodlandViewhands[] = {
+        "viewhands_player_sas_woodland",
+        "viewhands_sas_woodland",
+        "viewhands_black_kit",
+    };
+
+    switch (faction)
+    {
+    case VrPlayerFaction::GhillieSniper:
+        candidates = kGhillieViewhands;
+        candidateCount = sizeof(kGhillieViewhands) / sizeof(kGhillieViewhands[0]);
+        break;
+    case VrPlayerFaction::OpForDisguise:
+        candidates = kOpForViewhands;
+        candidateCount = sizeof(kOpForViewhands) / sizeof(kOpForViewhands[0]);
+        break;
+    case VrPlayerFaction::SasNightVision:
+        candidates = kSasNightVisionViewhands;
+        candidateCount = sizeof(kSasNightVisionViewhands) / sizeof(kSasNightVisionViewhands[0]);
+        break;
+    case VrPlayerFaction::Usmc:
+        candidates = kUsmcViewhands;
+        candidateCount = sizeof(kUsmcViewhands) / sizeof(kUsmcViewhands[0]);
+        break;
+    case VrPlayerFaction::SasUrban:
+        candidates = kSasUrbanViewhands;
+        candidateCount = sizeof(kSasUrbanViewhands) / sizeof(kSasUrbanViewhands[0]);
+        break;
+    case VrPlayerFaction::SasWoodland:
+    default:
+        candidates = kSasWoodlandViewhands;
+        candidateCount = sizeof(kSasWoodlandViewhands) / sizeof(kSasWoodlandViewhands[0]);
+        break;
+    }
+
+    for (size_t i = 0u; i < candidateCount; ++i)
+    {
+        const char* name = candidates[i];
+        if (IsFastFileLoad())
+        {
+            if (DB_FindXAssetEntry(ASSET_TYPE_XMODEL, name) != nullptr)
+            {
+                XModel* model = R_RegisterModel(name);
+                if (model != nullptr && model->numsurfs > 0 && model->surfs != nullptr)
+                {
+                    return model;
+                }
+            }
+        }
+        else
+        {
+            XModel* model = R_RegisterModel(name);
+            if (model != nullptr && model->numsurfs > 0 && model->surfs != nullptr)
+            {
+                return model;
+            }
+        }
+    }
+
+    static const char* const kGlobalViewhandsFallbacks[] = {
+        "viewhands_player_usmc",
+        "viewhands_player_sas_woodland",
+        "viewhands_black_kit",
+        "viewhands_sas_woodland",
+        "viewmodel_base_viewhands",
+    };
+    for (size_t i = 0u; i < sizeof(kGlobalViewhandsFallbacks) / sizeof(kGlobalViewhandsFallbacks[0]); ++i)
+    {
+        const char* name = kGlobalViewhandsFallbacks[i];
+        if (!IsFastFileLoad() || DB_FindXAssetEntry(ASSET_TYPE_XMODEL, name) != nullptr)
+        {
+            XModel* model = R_RegisterModel(name);
+            if (model != nullptr && model->numsurfs > 0 && model->surfs != nullptr)
+            {
+                return model;
+            }
+        }
+    }
+
+    return nullptr;
+}
+
 static float s_vrLastRenderedLeftWristOrigin[3] = {};
 static float s_vrLastRenderedLeftWristAxis[3][3] = {
     {1.0f, 0.0f, 0.0f},
@@ -1772,7 +1889,9 @@ static bool VR_SelectSplitHandTriangle(
 
     if (selection == VR_SPLIT_HAND_KEEP_RIGHT)
     {
-        if (leftArmWeightSum >= 0.50f)
+        if (leftArmWeightSum >= 0.10f ||
+            leftHandWeightSum >= 0.10f ||
+            maximumLeftHandWeight >= 0.05f)
         {
             return false;
         }
@@ -2296,22 +2415,25 @@ static bool VR_BuildSplitHandModels(
             sourceModel,
             "j_wristtwist_le");
 
+    const bool leftTwistValid =
+        (leftWristTwistIndex < 0) ||
+        VR_ModelBoneDescendsFrom(
+            sourceModel,
+            leftWristTwistIndex,
+            leftShoulderIndex);
+
     if (leftShoulderIndex < 0 ||
         leftWristIndex < 0 ||
-        leftWristTwistIndex < 0 ||
         !VR_ModelBoneDescendsFrom(
             sourceModel,
             leftWristIndex,
             leftShoulderIndex) ||
-        !VR_ModelBoneDescendsFrom(
-            sourceModel,
-            leftWristTwistIndex,
-            leftShoulderIndex))
+        !leftTwistValid)
     {
         Com_PrintWarning(
             0,
             "[VR][HANDS] Stock hand model '%s' lacks the left "
-            "shoulder/wrist/wrist-twist hierarchy required for the "
+            "shoulder/wrist hierarchy required for the "
             "runtime floating-hand split.\n",
             XModelGetName(sourceModel));
 
@@ -2333,18 +2455,21 @@ static bool VR_BuildSplitHandModels(
             sourceModel,
             "j_wristtwist_ri");
 
-    const bool rightArmHierarchyReady =
-        rightShoulderIndex >= 0 &&
-        rightWristIndex >= 0 &&
-        rightWristTwistIndex >= 0 &&
-        VR_ModelBoneDescendsFrom(
-            sourceModel,
-            rightWristIndex,
-            rightShoulderIndex) &&
+    const bool rightTwistValid =
+        (rightWristTwistIndex < 0) ||
         VR_ModelBoneDescendsFrom(
             sourceModel,
             rightWristTwistIndex,
             rightShoulderIndex);
+
+    const bool rightArmHierarchyReady =
+        rightShoulderIndex >= 0 &&
+        rightWristIndex >= 0 &&
+        VR_ModelBoneDescendsFrom(
+            sourceModel,
+            rightWristIndex,
+            rightShoulderIndex) &&
+        rightTwistValid;
 
     XSurface* rightOnlySurfaces =
         reinterpret_cast<XSurface*>(
@@ -3609,29 +3734,35 @@ static bool VR_BuildHiddenWeaponHandModel(
             sourceModel,
             "j_wristtwist_ri");
 
-    const bool armHierarchiesReady =
-        leftShoulderIndex >= 0 &&
-        leftWristIndex >= 0 &&
-        leftWristTwistIndex >= 0 &&
-        rightShoulderIndex >= 0 &&
-        rightWristIndex >= 0 &&
-        rightWristTwistIndex >= 0 &&
-        VR_ModelBoneDescendsFrom(
-            sourceModel,
-            leftWristIndex,
-            leftShoulderIndex) &&
+    const bool leftTwistValid =
+        (leftWristTwistIndex < 0) ||
         VR_ModelBoneDescendsFrom(
             sourceModel,
             leftWristTwistIndex,
-            leftShoulderIndex) &&
-        VR_ModelBoneDescendsFrom(
-            sourceModel,
-            rightWristIndex,
-            rightShoulderIndex) &&
+            leftShoulderIndex);
+
+    const bool rightTwistValid =
+        (rightWristTwistIndex < 0) ||
         VR_ModelBoneDescendsFrom(
             sourceModel,
             rightWristTwistIndex,
             rightShoulderIndex);
+
+    const bool armHierarchiesReady =
+        leftShoulderIndex >= 0 &&
+        leftWristIndex >= 0 &&
+        rightShoulderIndex >= 0 &&
+        rightWristIndex >= 0 &&
+        VR_ModelBoneDescendsFrom(
+            sourceModel,
+            leftWristIndex,
+            leftShoulderIndex) &&
+        leftTwistValid &&
+        VR_ModelBoneDescendsFrom(
+            sourceModel,
+            rightWristIndex,
+            rightShoulderIndex) &&
+        rightTwistValid;
 
     uint32_t preservedRigidTriangleCount = 0u;
     uint32_t preservedWeightedTriangleCount = 0u;
@@ -6532,33 +6663,22 @@ static bool VR_AddFloatingLeftHandToScene(
     const float heldMagazineAxis[3][3])
 {
     if (!VR_TrackedHandsEnabled() ||
-        weaponIndex <= 0 ||
-        weaponViewModel == nullptr ||
-        sourceHandModel == nullptr ||
-        weaponPose == nullptr ||
         playerState == nullptr ||
         cameraOrigin == nullptr ||
         cameraAxis == nullptr ||
-        lightingOrigin == nullptr ||
-        heldMagazineOrigin == nullptr ||
-        heldMagazineAxis == nullptr)
+        lightingOrigin == nullptr)
     {
-        static bool invalidSubmissionArgumentsLogWritten =
-            false;
+        return false;
+    }
 
-        if (VR_TrackedHandsEnabled() &&
-            !invalidSubmissionArgumentsLogWritten)
-        {
-            Com_PrintWarning(
-                0,
-                "[VR][HANDS] The floating-glove render call received "
-                "an unavailable weapon, hand model, pose, player "
-                "state, camera, or lighting input.\n");
+    if (sourceHandModel == nullptr)
+    {
+        const VrPlayerFaction currentFaction = VR_GetMissionPlayerFaction(nullptr);
+        sourceHandModel = VR_ResolveFactionViewhandsModel(currentFaction);
+    }
 
-            invalidSubmissionArgumentsLogWritten =
-                true;
-        }
-
+    if (sourceHandModel == nullptr)
+    {
         return false;
     }
 
@@ -6713,12 +6833,14 @@ static bool VR_AddFloatingLeftHandToScene(
     // means the current idle animation has not settled yet; the neutral hand
     // remains visible and controller-tracked while the bake retries.
     const bool supportGripPoseReady =
-        VR_BakeRigidSupportGripPose(
-            asset,
-            weaponIndex,
-            weaponViewModel,
-            weaponPose,
-            playerState);
+        (weaponIndex > 0 && weaponViewModel != nullptr && weaponPose != nullptr)
+            ? VR_BakeRigidSupportGripPose(
+                  asset,
+                  weaponIndex,
+                  weaponViewModel,
+                  weaponPose,
+                  playerState)
+            : false;
 
     float magazineRenderAxis[3][3] = {};
     float magazineWristOrigin[3] = {};
@@ -6730,6 +6852,8 @@ static bool VR_AddFloatingLeftHandToScene(
 
     bool magazineGripPoseAvailable =
         drawHeldMagazine &&
+        heldMagazineOrigin != nullptr &&
+        heldMagazineAxis != nullptr &&
         supportGripPoseReady &&
         VR_BuildHeldMagazineRenderAxis(
             heldMagazineAxis,
@@ -6836,6 +6960,8 @@ static bool VR_AddFloatingLeftHandToScene(
         supportGripPoseReady &&
         supportGripControllerPoseAvailable &&
         leftWristName != 0u &&
+        weaponPose != nullptr &&
+        weaponViewModel != nullptr &&
         CG_DObjGetWorldTagMatrix(
             weaponPose,
             weaponViewModel,
@@ -8369,6 +8495,14 @@ static void VR_AddPhysicalBodyRigToScene(
             s_vrLastRenderedLeftWristOrigin,
             sizeof(leftWristWorld));
     }
+    else
+    {
+        VR_GetLeftControllerGripWorld(
+            cameraOrigin,
+            cameraAxis,
+            leftWristWorld,
+            nullptr);
+    }
 
     float rightWristWorld[3] = {
         bodyState.rightWrist[0],
@@ -8410,7 +8544,7 @@ static void VR_AddPhysicalBodyRigToScene(
             sizeof(rightWristAxisWorld));
         rightHandViewmodelSuppressed = true;
     }
-    else if (VR_IsPhysicalWeaponHolstered() || !VR_IsRightControllerGripHeld())
+    else if (weaponNum == 0u || weaponViewModel == nullptr || VR_IsPhysicalWeaponHolstered())
     {
         rightHandViewmodelSuppressed = true;
         VR_GetRightControllerGripWorld(
@@ -8449,10 +8583,14 @@ static void VR_AddPhysicalBodyRigToScene(
     // standalone right glove at the right wrist so the right hand stays visible and connected.
     if (rightHandViewmodelSuppressed && VR_TrackedHandsEnabled())
     {
+        const VrPlayerFaction currentFaction = VR_GetMissionPlayerFaction(sourceHandModel);
+        XModel* factionHandModel = VR_ResolveFactionViewhandsModel(currentFaction);
         XModel* rightGloveSource =
             s_vrAirSupportStableRightHandDonorModel != nullptr
                 ? s_vrAirSupportStableRightHandDonorModel
-                : sourceHandModel;
+                : (sourceHandModel != nullptr
+                       ? sourceHandModel
+                       : factionHandModel);
         if (rightGloveSource != nullptr)
         {
             VrAirSupportRightHandAsset* rightGloveAsset =
@@ -8468,7 +8606,7 @@ static void VR_AddPhysicalBodyRigToScene(
                 float finalRightWristAxis[3][3] = {};
 
                 if (rightGloveAsset->modelAnatomicalFrameReady &&
-                    (VR_IsPhysicalWeaponHolstered() || !VR_IsRightControllerGripHeld()))
+                    (weaponNum == 0u || weaponViewModel == nullptr || VR_IsPhysicalWeaponHolstered()))
                 {
                     float invAnatomical[3][3] = {};
                     for (int r = 0; r < 3; ++r)
@@ -8566,12 +8704,15 @@ static void VR_AddPhysicalBodyRigToScene(
     // 1. Render the 3D Tactical Torso Vest + 2-Bone IK Left & Right Arms.
     const VrPlayerFaction currentFaction = VR_GetMissionPlayerFaction(sourceHandModel);
     XModel* factionModel = VR_ResolveFactionCharacterModel(currentFaction);
+    XModel* factionHandModel = VR_ResolveFactionViewhandsModel(currentFaction);
 
     XModel* donorModel = (sourceHandModel != nullptr)
         ? sourceHandModel
-        : (factionModel != nullptr
-               ? factionModel
-               : s_vrAirSupportStableRightHandDonorModel);
+        : (factionHandModel != nullptr
+               ? factionHandModel
+               : (factionModel != nullptr
+                      ? factionModel
+                      : s_vrAirSupportStableRightHandDonorModel));
 
     VrBodyRigTorsoAndArmsAsset* rigAsset =
         VR_GetOrCreateBodyRigTorsoAndArmsAsset(donorModel, currentFaction);
@@ -9194,9 +9335,9 @@ static void VR_AddPhysicalBodyRigToScene(
         const WeaponDef* offhandDef = BG_GetWeaponDef(equippedFrag);
         XModel* grenadeModel =
             offhandDef != nullptr
-                ? (offhandDef->projectileModel != nullptr
-                       ? offhandDef->projectileModel
-                       : offhandDef->worldModel[0])
+                ? (offhandDef->worldModel[0] != nullptr
+                       ? offhandDef->worldModel[0]
+                       : offhandDef->projectileModel)
                 : nullptr;
         if (grenadeModel != nullptr)
         {
@@ -9225,9 +9366,9 @@ static void VR_AddPhysicalBodyRigToScene(
         const WeaponDef* tacticalDef = BG_GetWeaponDef(equippedTactical);
         XModel* tacticalModel =
             tacticalDef != nullptr
-                ? (tacticalDef->projectileModel != nullptr
-                       ? tacticalDef->projectileModel
-                       : tacticalDef->worldModel[0])
+                ? (tacticalDef->worldModel[0] != nullptr
+                       ? tacticalDef->worldModel[0]
+                       : tacticalDef->projectileModel)
                 : nullptr;
         if (tacticalModel != nullptr)
         {
@@ -11860,6 +12001,21 @@ void __cdecl CG_AddViewWeapon(int32_t localClientNum)
                         ps->origin[1],
                         ps->origin[2] + ps->viewHeightCurrent,
                     };
+                    float dummyHeldOrigin[3] = {};
+                    float dummyHeldAxis[3][3] = {};
+                    VR_AddFloatingLeftHandToScene(
+                        0,
+                        nullptr,
+                        nullptr,
+                        nullptr,
+                        ps,
+                        cgameGlob->refdef.vieworg,
+                        cgameGlob->refdef.viewaxis,
+                        unarmedLightingOrigin,
+                        false,
+                        dummyHeldOrigin,
+                        dummyHeldAxis);
+
                     VR_AddPhysicalBodyRigToScene(
                         0u,
                         nullptr,
