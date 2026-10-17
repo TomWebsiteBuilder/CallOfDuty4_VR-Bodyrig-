@@ -851,8 +851,8 @@ void __cdecl CL_Frame(int localClientNum, int msec)
                 if (!s_vrTestCheatsApplied)
                 {
                     s_vrTestCheatsApplied = true;
-                    Com_Printf(0, "[VR] Sandbox test range active: unlocking full weapon armory, infinite ammo, and godmode.\n");
-                    Cbuf_AddText(0, "thereisacow 1337\nset sv_cheats 1\ngive all\ngive ammo\ngod\n");
+                    Com_Printf(0, "[VR] Sandbox test range active: enabling godmode and sv_cheats for weapon testing.\n");
+                    Cbuf_AddText(0, "thereisacow 1337\nset sv_cheats 1\ngod\n");
                 }
             }
         }
@@ -1839,6 +1839,13 @@ static void CL_VR_HoldToGripToggle_f()
 {
     VR_ToggleHoldToGrip();
 }
+
+static cmd_function_s CL_VR_SpawnGuns_f_VAR;
+static cmd_function_s CL_SpawnGunsAlias_f_VAR;
+static void CL_VR_SpawnGuns_f()
+{
+    Cbuf_AddText(0, "cmd spawn_guns\n");
+}
 #endif
 
 void __cdecl CL_Init(int localClientNum)
@@ -1979,6 +1986,8 @@ void __cdecl CL_Init(int localClientNum)
     Cmd_AddCommandInternal("vr_turn_toggle", CL_VR_TurnToggle_f, &CL_VR_TurnToggle_f_VAR);
     Cmd_AddCommandInternal("vr_seated_toggle", CL_VR_SeatedToggle_f, &CL_VR_SeatedToggle_f_VAR);
     Cmd_AddCommandInternal("vr_hold_toggle", CL_VR_HoldToGripToggle_f, &CL_VR_HoldToGripToggle_f_VAR);
+    Cmd_AddCommandInternal("vr_spawn_guns", CL_VR_SpawnGuns_f, &CL_VR_SpawnGuns_f_VAR);
+    Cmd_AddCommandInternal("spawn_guns", CL_VR_SpawnGuns_f, &CL_SpawnGunsAlias_f_VAR);
     Dvar_RegisterBool("vr_wristAmmo", true, DVAR_ARCHIVE, "Display live ammunition counter on operator wrist");
     Dvar_RegisterBool("vr_seatedMode", false, DVAR_ARCHIVE, "Enable seated VR playstyle mode");
     Dvar_RegisterBool("vr_holdToGrip", true, DVAR_ARCHIVE, "Enable holster tethering (hold-to-grip)");

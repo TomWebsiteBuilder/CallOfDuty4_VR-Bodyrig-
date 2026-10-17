@@ -1091,6 +1091,7 @@ void __cdecl G_InitGame(
     EntHandle::Init();
     SentientHandle::Init();
     memset(&level, 0, sizeof(level));
+    VR_ResetTestArmory();
     level.cachedTagMat.entnum = ENTITYNUM_NONE;
     level.cachedEntTargetTagMat.entnum = ENTITYNUM_NONE;
     level.currentEntityThink = -1;

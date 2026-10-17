@@ -8,6 +8,10 @@
 #include <universal/com_math.h>
 #include "actor.h"
 #include <server/sv_game.h>
+#include <database/database.h>
+#include <xanim/xmodel.h>
+#include <vector>
+#include <algorithm>
 
 void __cdecl G_FinishSetupSpawnPoint(gentity_s *ent)
 {
@@ -535,6 +539,13 @@ char *__cdecl ClientConnect(int clientNum)
     return 0;
 }
 
+static bool s_testArmorySpawned = false;
+
+void __cdecl VR_ResetTestArmory()
+{
+    s_testArmorySpawned = false;
+}
+
 void __cdecl ClientSpawn(gentity_s *ent)
 {
     gclient_s *client; // r31
@@ -637,6 +648,161 @@ void __cdecl ClientSpawn(gentity_s *ent)
     ClientEndFrame(ent);
     level.clientIsSpawning = 0;
     BG_PlayerStateToEntityState(&client->ps, &ent->s, 1, 1u);
+
+    const dvar_s* vrTestDvar = Dvar_FindVar("vr_testMode");
+    const char* const vrTestEnv = std::getenv("KISAK_VR_TEST_MODE");
+    const bool testMode = (vrTestDvar && vrTestDvar->current.enabled) ||
+                          (vrTestEnv && (vrTestEnv[0] == '1' || vrTestEnv[0] == 't' || vrTestEnv[0] == 'T'));
+    if (testMode)
+    {
+        ent->flags |= FL_GODMODE;
+        client->invulnerableEnabled = 1;
+
+        if (!s_testArmorySpawned)
+        {
+            s_testArmorySpawned = true;
+            VR_SpawnArmoryOnFloor(ent);
+        }
+    }
+}
+
+static void VR_EnumWeaponAssetCallback(XAssetHeader header, void* data)
+{
+    if (BG_GetNumWeapons() >= 126)
+        return;
+    WeaponDef* weap = header.weapon;
+    if (weap && weap->szInternalName && *weap->szInternalName)
+    {
+        if (I_stricmp(weap->szInternalName, "none") != 0 &&
+            I_stricmp(weap->szInternalName, "defaultweapon") != 0)
+        {
+            G_GetWeaponIndexForName(weap->szInternalName);
+        }
+    }
+}
+
+void __cdecl VR_SpawnArmoryOnFloor(gentity_s *ent)
+{
+    if (!ent || !ent->client)
+        return;
+
+    // 1. Precache/register candidates from SP weapon repertoire
+    static const char* const s_candidateWeapons[] = {
+        // Pistols
+        "beretta", "colt45", "usp", "usp_silencer", "deserteagle", "deserteagle_gold",
+        // Submachine Guns
+        "mp5", "mp5_silencer", "skorpion", "mini_uzi", "ak74u", "p90",
+        // Assault Rifles
+        "m4_grunt", "m4_silencer", "m16_basic", "m16_acog", "m16_reflex",
+        "ak47", "ak47_silencer", "g36c", "g36c_reflex", "g36c_silencer", "g3",
+        "m14", "m14_scoped",
+        // Shotguns
+        "winchester1200", "m1014",
+        // Light Machine Guns
+        "saw", "rpd", "m60e4",
+        // Sniper Rifles
+        "m40a3", "remington700", "m21", "m21_woodland", "dragunov", "barrett",
+        // Launchers
+        "rpg7", "at4"
+    };
+
+    for (const char* wName : s_candidateWeapons)
+    {
+        if (BG_GetNumWeapons() >= 126)
+            break;
+        G_GetWeaponIndexForName(wName);
+    }
+
+    // Also enumerate FastFile for any additional map-specific weapon assets
+    DB_EnumXAssets(ASSET_TYPE_WEAPON, VR_EnumWeaponAssetCallback, nullptr, 0);
+
+    // 2. Collect valid firearm weapons with world models
+    std::vector<uint32_t> validWeapons;
+    const uint32_t numWeapons = BG_GetNumWeapons();
+    for (uint32_t w = 1; w < numWeapons; ++w)
+    {
+        const WeaponDef* def = BG_GetWeaponDef(w);
+        if (!def)
+            continue;
+        if (def->inventoryType != WEAPINVENTORY_PRIMARY)
+            continue;
+        if (!def->worldModel[0] || XModelBad(def->worldModel[0]))
+            continue;
+        if (!BG_CanPlayerHaveWeapon(w))
+            continue;
+        const gitem_s* item = BG_FindItemForWeapon(w, 0);
+        if (!item || item->giType != IT_WEAPON)
+            continue;
+        validWeapons.push_back(w);
+    }
+
+    if (validWeapons.empty())
+    {
+        Com_Printf(0, "[VR] No valid weapons found to spawn on floor.\n");
+        return;
+    }
+
+    // 3. Sort by weapon category then name
+    auto GetWeaponClassOrder = [](weapClass_t wc) -> int {
+        switch (wc) {
+            case WEAPCLASS_PISTOL: return 0;
+            case WEAPCLASS_SMG: return 1;
+            case WEAPCLASS_RIFLE: return 2;
+            case WEAPCLASS_SPREAD: return 3;
+            case WEAPCLASS_MG: return 4;
+            case WEAPCLASS_ROCKETLAUNCHER: return 5;
+            default: return 6;
+        }
+    };
+
+    std::sort(validWeapons.begin(), validWeapons.end(), [&](uint32_t a, uint32_t b) {
+        const WeaponDef* defA = BG_GetWeaponDef(a);
+        const WeaponDef* defB = BG_GetWeaponDef(b);
+        int orderA = GetWeaponClassOrder(defA->weapClass);
+        int orderB = GetWeaponClassOrder(defB->weapClass);
+        if (orderA != orderB)
+            return orderA < orderB;
+        return strcmp(defA->szInternalName, defB->szInternalName) < 0;
+    });
+
+    // 4. Calculate spawn geometry relative to player
+    vec3_t forward, right, up;
+    AngleVectors(ent->r.currentAngles, forward, right, up);
+    forward[2] = 0.0f;
+    Vec3Normalize(forward);
+    right[2] = 0.0f;
+    Vec3Normalize(right);
+
+    const int cols = 5;
+    const float colSpacing = 28.0f;
+    const float rowSpacing = 30.0f;
+    const float startDist = 65.0f;
+
+    int spawnedCount = 0;
+    for (size_t i = 0; i < validWeapons.size(); ++i)
+    {
+        int row = (int)(i / cols);
+        int col = (int)(i % cols);
+        float fwdOffset = startDist + (float)row * rowSpacing;
+        float rgtOffset = ((float)col - (float)(cols - 1) * 0.5f) * colSpacing;
+
+        gentity_s* gunEnt = G_Spawn();
+        gunEnt->r.currentOrigin[0] = ent->r.currentOrigin[0] + forward[0] * fwdOffset + right[0] * rgtOffset;
+        gunEnt->r.currentOrigin[1] = ent->r.currentOrigin[1] + forward[1] * fwdOffset + right[1] * rgtOffset;
+        gunEnt->r.currentOrigin[2] = ent->r.currentOrigin[2] + 20.0f;
+
+        gunEnt->r.currentAngles[0] = 0.0f;
+        gunEnt->r.currentAngles[1] = ent->r.currentAngles[1];
+        gunEnt->r.currentAngles[2] = 0.0f;
+
+        const gitem_s* item = BG_FindItemForWeapon(validWeapons[i], 0);
+        G_GetItemClassname(item, &gunEnt->classname);
+        G_SpawnItem(gunEnt, item);
+        FinishSpawningItem(gunEnt);
+        spawnedCount++;
+    }
+
+    Com_Printf(0, "[VR] Successfully spawned %d weapons on the floor in front of player.\n", spawnedCount);
 }
 
 void __cdecl HeadHitEnt_Pain(

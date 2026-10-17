@@ -432,7 +432,7 @@ void __cdecl BG_SetupWeaponAlts(uint32_t weapIndex, void(__cdecl *regWeap)(uint3
     {
         altWeaponIndex = BG_GetWeaponIndexForName(weapDef->szAltWeaponName, regWeap);
         if (!altWeaponIndex)
-            Com_Error(ERR_DROP, "could not find altWeapon %s for weapon %s", weapDef->szAltWeaponName, weapDef->szInternalName);
+            Com_PrintWarning(17, "could not find altWeapon %s for weapon %s\n", weapDef->szAltWeaponName, weapDef->szInternalName);
         weapDef->altWeaponIndex = altWeaponIndex;
     }
 }

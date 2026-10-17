@@ -353,6 +353,8 @@ int32_t __cdecl IsItemRegistered(uint32_t iItemIndex);
 void __cdecl G_SpawnItem(gentity_s *ent, const gitem_s *item);
 void __cdecl G_RunItem(gentity_s *ent);
 void __cdecl G_OrientItemToGround(gentity_s *ent, trace_t *trace);
+void __cdecl VR_SpawnArmoryOnFloor(gentity_s *ent);
+void __cdecl VR_ResetTestArmory();
 
 
 

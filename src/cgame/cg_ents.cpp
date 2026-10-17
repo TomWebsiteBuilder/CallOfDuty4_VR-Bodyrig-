@@ -184,7 +184,7 @@ void __cdecl CG_Item(centity_s *cent)
     p_nextState = &cent->nextState;
 
     if (cent->nextState.index.item >= 0x800u)
-        Com_Error(ERR_DROP, "Bad item index %i on entity", cent->nextState.index);
+        return;
 
     if ((p_nextState->lerp.eFlags & 0x20) == 0)
     {
@@ -192,9 +192,8 @@ void __cdecl CG_Item(centity_s *cent)
         v4 = (unsigned int)v3 >> 7;
         v5 = v3 - (v3 >> 7 << 7);
         weapDef = BG_GetWeaponDef(v5);
-        iassert(weapDef);
-        if (!weapDef->worldModel[v4])
-            Com_Error(ERR_DROP, "Bad item/weap index"); //KISAKTODO: "XModel loaded for item index %i weap index %i model %i (%s)", *(unsigned __int16 *)p_nextState->index, v5);
+        if (!weapDef || !weapDef->worldModel[v4])
+            return;
 
         obj = Com_GetClientDObj(p_nextState->number, 0);
 

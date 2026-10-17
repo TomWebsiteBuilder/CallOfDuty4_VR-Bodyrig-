@@ -1104,6 +1104,12 @@ void __cdecl ClientCommand(int clientNum, const char *s)
             SV_Cmd_EndTokenizedString();
             return;
         }
+        if (!I_stricmp(v7, "spawn_guns") || !I_stricmp(v7, "vr_spawn_guns") || !I_stricmp(v7, "vr_spawn_armory"))
+        {
+            VR_SpawnArmoryOnFloor(v3);
+            SV_Cmd_EndTokenizedString();
+            return;
+        }
         v6 = va("print \"GAME_UNKNOWNCLIENTCOMMAND\x15%s\"", v7);
         SV_GameSendServerCommand(clientNum, v6);
     }

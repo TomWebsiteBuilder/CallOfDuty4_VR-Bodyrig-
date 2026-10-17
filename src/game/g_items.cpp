@@ -1177,10 +1177,12 @@ void __cdecl G_RegisterWeapon(uint32_t weapIndex)
     if (*weapDef->szUseHintString
         && !G_GetHintStringIndex(&weapDef->iUseHintStringIndex, (char *)weapDef->szUseHintString))
     {
-        Com_Error(ERR_DROP, "Too many different hintstring values on weapons. Max allowed is %i different strings", 32);
+        weapDef->iUseHintStringIndex = 0;
     }
     if (*weapDef->dropHintString && !G_GetHintStringIndex(&weapDef->dropHintStringIndex, (char *)weapDef->dropHintString))
-        Com_Error(ERR_DROP, "Too many different hintstring values on weapons. Max allowed is %i different strings", 32);
+    {
+        weapDef->dropHintStringIndex = 0;
+    }
     for (weapModel = 0; weapModel < 0x10u; ++weapModel)
     {
         if (weapDef->worldModel[weapModel])
