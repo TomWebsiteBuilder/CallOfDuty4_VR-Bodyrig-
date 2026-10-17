@@ -828,20 +828,38 @@ void __cdecl CL_Frame(int localClientNum, int msec)
             UI_SetActiveMenu(0, UIMENU_MAIN);
         }
 
-        static bool s_vrTestModeInitialized = false;
+        static bool s_vrTestMapLaunched = false;
+        static bool s_vrTestCheatsApplied = false;
         const dvar_s* vrTestDvar = Dvar_FindVar("vr_testMode");
-        if (clientUIActives[0].connectionState == CA_ACTIVE)
+        const char* const vrTestEnv = std::getenv("KISAK_VR_TEST_MODE");
+        const bool testRangeActive = (vrTestDvar && vrTestDvar->current.enabled) ||
+                                     (vrTestEnv && (vrTestEnv[0] == '1' || vrTestEnv[0] == 't' || vrTestEnv[0] == 'T'));
+
+        if (testRangeActive)
         {
-            if (vrTestDvar && vrTestDvar->current.enabled && !s_vrTestModeInitialized)
+            if (clientUIActives[0].connectionState == CA_DISCONNECTED && !com_sv_running->current.enabled)
             {
-                s_vrTestModeInitialized = true;
-                Com_Printf(0, "[VR] Sandbox test range active: unlocking full weapon armory, infinite ammo, and godmode.\n");
-                Cbuf_AddText(0, "thereisacow 1337\ngive all\ngive ammo\ngod\n");
+                if (!s_vrTestMapLaunched)
+                {
+                    s_vrTestMapLaunched = true;
+                    Com_Printf(0, "[VR] Sandbox test range active: auto-loading Killhouse firing range (spdevmap killhouse).\n");
+                    Cbuf_AddText(0, "set thereisacow 1337\nspdevmap killhouse\n");
+                }
+            }
+            else if (clientUIActives[0].connectionState == CA_ACTIVE)
+            {
+                if (!s_vrTestCheatsApplied)
+                {
+                    s_vrTestCheatsApplied = true;
+                    Com_Printf(0, "[VR] Sandbox test range active: unlocking full weapon armory, infinite ammo, and godmode.\n");
+                    Cbuf_AddText(0, "thereisacow 1337\ngive all\ngive ammo\ngod\n");
+                }
             }
         }
         else
         {
-            s_vrTestModeInitialized = false;
+            s_vrTestMapLaunched = false;
+            s_vrTestCheatsApplied = false;
         }
 
         CL_DevGuiFrame(0);
@@ -1964,7 +1982,9 @@ void __cdecl CL_Init(int localClientNum)
     Dvar_RegisterBool("vr_wristAmmo", true, DVAR_ARCHIVE, "Display live ammunition counter on operator wrist");
     Dvar_RegisterBool("vr_seatedMode", false, DVAR_ARCHIVE, "Enable seated VR playstyle mode");
     Dvar_RegisterBool("vr_holdToGrip", true, DVAR_ARCHIVE, "Enable holster tethering (hold-to-grip)");
-    Dvar_RegisterBool("vr_testMode", false, DVAR_ARCHIVE, "Enable dedicated VR sandbox weapons testing range");
+    const char* const vrTestEnvInit = std::getenv("KISAK_VR_TEST_MODE");
+    const bool vrTestDefault = (vrTestEnvInit && (vrTestEnvInit[0] == '1' || vrTestEnvInit[0] == 't' || vrTestEnvInit[0] == 'T'));
+    Dvar_RegisterBool("vr_testMode", vrTestDefault, DVAR_ARCHIVE, "Enable dedicated VR sandbox weapons testing range");
 #endif
     Com_Printf(14, "----- Initializing Renderer ----\n");
 

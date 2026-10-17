@@ -386,7 +386,7 @@ if "%KISAK_VR_VERBOSE_DIAGNOSTICS%"=="1" (
   +set con_errormessagetime %VR_ERROR_TIME% ^
   +set con_minicon 0 ^
   +set cg_drawFPS 0 ^
-  +set com_statmon 0
+  +set com_statmon 0 %*
 
 set "VR_EXIT_CODE=%ERRORLEVEL%"
 if not "%VR_EXIT_CODE%"=="0" (

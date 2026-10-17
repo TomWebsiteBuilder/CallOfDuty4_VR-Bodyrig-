@@ -9,11 +9,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     (void)lpCmdLine;
     (void)nCmdShow;
 
+    SetEnvironmentVariableA("KISAK_VR_TEST_MODE", "1");
     ShellExecuteA(
         NULL,
         "open",
         "KisakCOD-sp.exe",
-        "+set vr_testMode 1 +devmap killhouse +set thereisacow 1337",
+        "+set vr_testMode 1 +spdevmap killhouse +set thereisacow 1337",
         NULL,
         SW_SHOWNORMAL);
 
