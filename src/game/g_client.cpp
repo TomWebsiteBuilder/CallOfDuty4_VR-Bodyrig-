@@ -6,8 +6,8 @@
 #include "g_main.h"
 #include <script/scr_const.h>
 #include <universal/com_math.h>
-#include "actor.h"
 #include <server/sv_game.h>
+#include <xanim/xanim.h>
 
 void __cdecl G_FinishSetupSpawnPoint(gentity_s *ent)
 {
@@ -637,6 +637,68 @@ void __cdecl ClientSpawn(gentity_s *ent)
     ClientEndFrame(ent);
     level.clientIsSpawning = 0;
     BG_PlayerStateToEntityState(&client->ps, &ent->s, 1, 1u);
+
+    const dvar_s* vrTestDvar = Dvar_FindVar("vr_testMode");
+    const char* const vrTestEnv = std::getenv("KISAK_VR_TEST_MODE");
+    const bool testMode = (vrTestDvar && vrTestDvar->current.enabled) ||
+                          (vrTestEnv && (vrTestEnv[0] == '1' || vrTestEnv[0] == 't' || vrTestEnv[0] == 'T'));
+    if (testMode)
+    {
+        ent->flags |= FL_GODMODE;
+        client->invulnerableEnabled = 1;
+        client->ps.stats[0] = 9999;
+        client->ps.stats[2] = 9999;
+        ent->health = 9999;
+
+        for (unsigned int w = 1; w < BG_GetNumWeapons(); ++w)
+        {
+            if (BG_CanPlayerHaveWeapon(w))
+            {
+                G_GivePlayerWeapon(&client->ps, w, 0);
+                Add_Ammo(ent, w, 0, 9999, 1);
+            }
+        }
+
+        for (unsigned int w = 1; w < BG_GetNumWeapons(); ++w)
+        {
+            if (BG_CanPlayerHaveWeapon(w))
+            {
+                const WeaponDef* def = BG_GetWeaponDef(w);
+                if (def && def->inventoryType == WEAPINVENTORY_PRIMARY)
+                {
+                    G_SelectWeaponIndex(v3, w);
+                    break;
+                }
+            }
+        }
+
+        float spawnRowX = 3200.0f;
+        float spawnRowY = -2064.0f;
+        float spawnRowZ = 32.0f;
+        int spawnCount = 0;
+        for (unsigned int w = 1; w < BG_GetNumWeapons(); ++w)
+        {
+            if (BG_CanPlayerHaveWeapon(w))
+            {
+                const WeaponDef* def = BG_GetWeaponDef(w);
+                if (def && def->inventoryType != WEAPINVENTORY_OFFHAND)
+                {
+                    const gitem_s* item = BG_FindItemForWeapon(w, 0);
+                    if (item)
+                    {
+                        gentity_s* dropped = G_Spawn();
+                        dropped->r.currentOrigin[0] = spawnRowX - (spawnCount % 6) * 28.0f;
+                        dropped->r.currentOrigin[1] = spawnRowY + (spawnCount / 6) * 32.0f;
+                        dropped->r.currentOrigin[2] = spawnRowZ;
+                        G_GetItemClassname(item, &dropped->classname);
+                        G_SpawnItem(dropped, item);
+                        dropped->active = 1;
+                        spawnCount++;
+                    }
+                }
+            }
+        }
+    }
 }
 
 void __cdecl HeadHitEnt_Pain(

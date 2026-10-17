@@ -603,6 +603,16 @@ void __cdecl Scr_LoadLevel()
 {
     unsigned __int16 v0; // r3
 
+    const dvar_s* vrTestDvar = Dvar_FindVar("vr_testMode");
+    const char* const vrTestEnv = std::getenv("KISAK_VR_TEST_MODE");
+    const bool testMode = (vrTestDvar && vrTestDvar->current.enabled) ||
+                          (vrTestEnv && (vrTestEnv[0] == '1' || vrTestEnv[0] == 't' || vrTestEnv[0] == 'T'));
+    if (testMode)
+    {
+        Com_Printf(0, "[VR] Sandbox test range active: skipping mission script. Pure sandbox mode enabled.\n");
+        return;
+    }
+
     if (g_scr_data.levelscript)
     {
         v0 = Scr_ExecThread(g_scr_data.levelscript, 0);

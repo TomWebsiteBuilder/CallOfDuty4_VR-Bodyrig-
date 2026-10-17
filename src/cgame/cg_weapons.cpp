@@ -12490,7 +12490,12 @@ char __cdecl CycleWeapPrimary(int32_t localClientNum, int32_t cycleForward, int3
     }
     else
     {
-        if (weapDef->inventoryType == WEAPINVENTORY_PRIMARY || !cgameGlob->weaponLatestPrimaryIdx)
+        const dvar_s* vrTestDvar = Dvar_FindVar("vr_testMode");
+        const char* const vrTestEnv = std::getenv("KISAK_VR_TEST_MODE");
+        const bool testMode = (vrTestDvar && vrTestDvar->current.enabled) ||
+                              (vrTestEnv && (vrTestEnv[0] == '1' || vrTestEnv[0] == 't' || vrTestEnv[0] == 'T'));
+
+        if (testMode || weapDef->inventoryType == WEAPINVENTORY_PRIMARY || !cgameGlob->weaponLatestPrimaryIdx)
             goto LABEL_21;
         bitNum = cgameGlob->weaponLatestPrimaryIdx;
 
