@@ -433,6 +433,9 @@ bool VR_GetManualGrenadeRenderState(
 // native offhand state temporarily selects the grenade viewmodel.
 bool VR_IsManualGrenadeViewOverrideActive();
 
+// True while a manual grenade/flashbang is held specifically in the weapon hand.
+bool VR_IsManualGrenadeHeldInWeaponHand();
+
 // Shared prediction uses this to remove the canned post-release delay.  The
 // native pullback/cook states are preserved; only the final physical release
 // is committed on the next simulation step.
@@ -566,7 +569,9 @@ bool VR_GetPhysicalBodyRigRenderState(
     bool* knifeDrawn,
     bool* knifeInWeaponHand,
     float heldKnifeOrigin[3],
-    float heldKnifeAxis[3][3]);
+    float heldKnifeAxis[3][3],
+    float tacticalPouchOrigin[3] = nullptr,
+    float tacticalPouchAxis[3][3] = nullptr);
 
 // Returns the authoritative world-space origin and blade/swing direction when
 // a physical 6DoF combat knife slash/stab triggers FireWeaponMelee.

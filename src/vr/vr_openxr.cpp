@@ -2526,6 +2526,7 @@ struct VrManualGrenadeState
         VrManualGrenadeStage::Ready;
     VrManualGrenadeSlot slot =
         VrManualGrenadeSlot::None;
+    bool inWeaponHand = false;
     int weaponIndex = 0;
     std::uint32_t releasedAtMilliseconds = 0u;
     std::uint32_t pendingUntilMilliseconds = 0u;
@@ -17855,7 +17856,9 @@ static void VR_ComputeBodyRigAnchorsWorld(
     float magPouchOrigin[3],
     float magPouchAxis[3][3],
     float grenadePouchOrigin[3],
-    float grenadePouchAxis[3][3])
+    float grenadePouchAxis[3][3],
+    float tacticalPouchOrigin[3] = nullptr,
+    float tacticalPouchAxis[3][3] = nullptr)
 {
     float levelForward[3] = {
         cameraAxis[0][0],
@@ -18050,6 +18053,28 @@ static void VR_ComputeBodyRigAnchorsWorld(
         grenadePouchAxis[0][i] = levelForward[i];
         grenadePouchAxis[1][i] = levelLeft[i];
         grenadePouchAxis[2][i] = levelUp[i];
+    }
+
+    // Dedicated physical chest & tactical vest rig anchor for flashbangs and smoke/secondary grenades
+    if (tacticalPouchOrigin != nullptr && tacticalPouchAxis != nullptr)
+    {
+        const float tacticalForward =
+            7.2f + configurable.beltForwardOffset * 0.4f;
+        const float tacticalLeft =
+            weaponSideSign * 4.8f;
+        const float tacticalUp =
+            -10.0f;
+        for (int i = 0; i < 3; ++i)
+        {
+            tacticalPouchOrigin[i] =
+                cameraOrigin[i] +
+                levelForward[i] * tacticalForward +
+                levelLeft[i] * tacticalLeft +
+                levelUp[i] * tacticalUp;
+            tacticalPouchAxis[0][i] = levelForward[i];
+            tacticalPouchAxis[1][i] = levelLeft[i];
+            tacticalPouchAxis[2][i] = levelUp[i];
+        }
     }
 }
 
@@ -18532,6 +18557,14 @@ bool VR_IsPhysicalKnifeHeld()
     return g_vrPhysicalBodyRig.knifeDrawn;
 }
 
+bool VR_IsManualGrenadeHeldInWeaponHand()
+{
+    std::lock_guard<std::mutex> lock(
+        g_vrWeaponControllerPoseMutex);
+    return g_vrManualGrenade.stage == VrManualGrenadeStage::Holding &&
+           g_vrManualGrenade.inWeaponHand;
+}
+
 
 bool VR_GetPhysicalBodyRigRenderState(
     const float cameraOrigin[3],
@@ -18551,7 +18584,9 @@ bool VR_GetPhysicalBodyRigRenderState(
     bool* knifeDrawn,
     bool* knifeInWeaponHand,
     float heldKnifeOrigin[3],
-    float heldKnifeAxis[3][3])
+    float heldKnifeAxis[3][3],
+    float tacticalPouchOrigin[3],
+    float tacticalPouchAxis[3][3])
 {
     if (cameraOrigin == nullptr ||
         cameraAxis == nullptr ||
@@ -18592,7 +18627,9 @@ bool VR_GetPhysicalBodyRigRenderState(
         magPouchOrigin,
         magPouchAxis,
         grenadePouchOrigin,
-        grenadePouchAxis);
+        grenadePouchAxis,
+        tacticalPouchOrigin,
+        tacticalPouchAxis);
 
     std::lock_guard<std::mutex> lock(
         g_vrWeaponControllerPoseMutex);
@@ -19183,6 +19220,40 @@ bool VR_UpdateManualGrenadeInput(
             const VrConfiguratorSettings& configurable =
                 VR_GetConfiguratorSettings();
 
+            float bodyOrigin[3] = {};
+            float bodyAxis[3][3] = {};
+            float hipHolsterOrigin[3] = {};
+            float hipHolsterAxis[3][3] = {};
+            float chestSlingOrigin[3] = {};
+            float chestSlingAxis[3][3] = {};
+            float knifeSheathOrigin[3] = {};
+            float knifeSheathAxis[3][3] = {};
+            float magPouchOrigin[3] = {};
+            float magPouchAxis[3][3] = {};
+            float grenadePouchOrigin[3] = {};
+            float grenadePouchAxis[3][3] = {};
+            float tacticalPouchOrigin[3] = {};
+            float tacticalPouchAxis[3][3] = {};
+
+            VR_ComputeBodyRigAnchorsWorld(
+                cameraOrigin,
+                cameraAxis,
+                configurable,
+                bodyOrigin,
+                bodyAxis,
+                hipHolsterOrigin,
+                hipHolsterAxis,
+                chestSlingOrigin,
+                chestSlingAxis,
+                knifeSheathOrigin,
+                knifeSheathAxis,
+                magPouchOrigin,
+                magPouchAxis,
+                grenadePouchOrigin,
+                grenadePouchAxis,
+                tacticalPouchOrigin,
+                tacticalPouchAxis);
+
             const VrGrenades::BeltSettings beltSettings = {
                 configurable.beltForwardOffset, configurable.beltHeight,
                 configurable.beltHipDistance, configurable.beltGrabRadius};
@@ -19192,6 +19263,92 @@ bool VR_UpdateManualGrenadeInput(
                 beltSettings);
             const bool insideLeftHip = beltZones.left;
             const bool insideRightHip = beltZones.right;
+
+            const auto dist3 = [](const float a[3], const float b[3]) -> float
+            {
+                const float dx = a[0] - b[0];
+                const float dy = a[1] - b[1];
+                const float dz = a[2] - b[2];
+                return std::sqrt(dx * dx + dy * dy + dz * dz);
+            };
+
+            float rightWorld[3] = {};
+            float rightVelocity[3] = {};
+            float rightAxisWorld[3][3] = {};
+            if (g_vrRightControllerWeaponPoseValid)
+            {
+                for (int c = 0; c < 3; ++c)
+                {
+                    rightWorld[c] = cameraOrigin[c] +
+                        g_vrRightControllerWeaponPosition[0] * cameraAxis[0][c] +
+                        g_vrRightControllerWeaponPosition[1] * cameraAxis[1][c] +
+                        g_vrRightControllerWeaponPosition[2] * cameraAxis[2][c];
+                    rightVelocity[c] =
+                        g_vrRightControllerLinearVelocity[0] * cameraAxis[0][c] +
+                        g_vrRightControllerLinearVelocity[1] * cameraAxis[1][c] +
+                        g_vrRightControllerLinearVelocity[2] * cameraAxis[2][c];
+                    for (int r = 0; r < 3; ++r)
+                    {
+                        rightAxisWorld[r][c] =
+                            g_vrRightControllerGripAxis[r][0] * cameraAxis[0][c] +
+                            g_vrRightControllerGripAxis[r][1] * cameraAxis[1][c] +
+                            g_vrRightControllerGripAxis[r][2] * cameraAxis[2][c];
+                    }
+                }
+            }
+
+            constexpr float kTacticalPouchRadius = 9.8f;
+            constexpr float kFragPouchRadius = 9.2f;
+
+            const bool leftNearTactical =
+                poseValid &&
+                dist3(currentOrigin, tacticalPouchOrigin) <= kTacticalPouchRadius;
+            const bool rightNearTactical =
+                g_vrRightControllerWeaponPoseValid &&
+                dist3(rightWorld, tacticalPouchOrigin) <= kTacticalPouchRadius;
+
+            const bool leftNearFrag =
+                (poseValid && dist3(currentOrigin, grenadePouchOrigin) <= kFragPouchRadius) ||
+                insideLeftHip;
+            const bool rightNearFrag =
+                g_vrRightControllerWeaponPoseValid &&
+                dist3(rightWorld, grenadePouchOrigin) <= kFragPouchRadius;
+
+            // Hover haptics for intuitive proximity cueing
+            static bool s_lastLeftNearTac = false;
+            static bool s_lastRightNearTac = false;
+            static bool s_lastLeftNearFrag = false;
+            static bool s_lastRightNearFrag = false;
+
+            if (leftNearTactical && !s_lastLeftNearTac)
+            {
+                VR_ApplyOffhandControllerHaptic(0.22f, 0.025f);
+            }
+            if (rightNearTactical && !s_lastRightNearTac)
+            {
+                VR_ApplyRightControllerWeaponHaptic(0.22f, 0.025f);
+            }
+            if (leftNearFrag && !s_lastLeftNearFrag)
+            {
+                VR_ApplyOffhandControllerHaptic(0.22f, 0.025f);
+            }
+            if (rightNearFrag && !s_lastRightNearFrag)
+            {
+                VR_ApplyRightControllerWeaponHaptic(0.22f, 0.025f);
+            }
+
+            s_lastLeftNearTac = leftNearTactical;
+            s_lastRightNearTac = rightNearTactical;
+            s_lastLeftNearFrag = leftNearFrag;
+            s_lastRightNearFrag = rightNearFrag;
+
+            const bool rightSqueezeHeld = g_vrRightControllerSqueezePressedRaw;
+            static bool s_rightSqueezeWasHeld = false;
+            const bool rightGripPressed =
+                rightSqueezeHeld && !s_rightSqueezeWasHeld;
+            s_rightSqueezeWasHeld = rightSqueezeHeld;
+
+            static uint32_t s_rightReleasePendingMs = 0u;
 
             const bool magazineOwnsLeftGrip =
                 VR_ManualMagazineOwnsOrClaimsLeftGripLocked(
@@ -19206,7 +19363,7 @@ bool VR_UpdateManualGrenadeInput(
                 g_vrManualGrenade.stage ==
                     VrManualGrenadeStage::Ready &&
                 gripUpdate.grabPressed &&
-                (insideLeftHip || insideRightHip);
+                (insideLeftHip || insideRightHip || leftNearFrag || leftNearTactical);
 
             if (beltGrabPressed &&
                 (magazineOwnsLeftGrip ||
@@ -19219,155 +19376,264 @@ bool VR_UpdateManualGrenadeInput(
                     supportGripCandidate;
             }
 
-            if (beltGrabPressed &&
-                !magazineOwnsLeftGrip &&
-                !supportGripCandidate)
+            if (g_vrManualGrenade.stage == VrManualGrenadeStage::Ready)
             {
-                const bool fragUsesLeftHip =
-                    VrInteractions::FragUsesLeftHip(
-                        configurable.dominantHand,
-                        configurable.grenadeBeltLayout);
-                const VrManualGrenadeSlot selectedSlot =
-                    insideLeftHip == fragUsesLeftHip
-                        ? VrManualGrenadeSlot::Frag
-                        : VrManualGrenadeSlot::Tactical;
+                VrManualGrenadeSlot selectedSlot = VrManualGrenadeSlot::None;
+                int selectedWeaponIndex = 0;
+                bool grabByRightHand = false;
 
-                const int selectedWeaponIndex =
-                    selectedSlot ==
-                            VrManualGrenadeSlot::Frag
-                        ? fragWeaponIndex
-                        : tacticalWeaponIndex;
-
-                loggedSlot = selectedSlot;
-                loggedWeaponIndex = selectedWeaponIndex;
-                loggedLocalPosition[0] = localForward;
-                loggedLocalPosition[1] = localLeft;
-                loggedLocalPosition[2] = localUp;
-
-                if (selectedWeaponIndex > 0)
+                // Priority 1: Dedicated Chest Tactical Vest Pouch (Flashbang / Smoke)
+                if (leftNearTactical &&
+                    gripUpdate.grabPressed &&
+                    !magazineOwnsLeftGrip &&
+                    !supportGripCandidate)
                 {
-                    VR_ClearManualGrenadeVelocityHistoryLocked();
-
-                    g_vrManualGrenade.stage =
-                        VrManualGrenadeStage::Holding;
-
-                    g_vrManualGrenade.slot =
-                        selectedSlot;
-
-                    g_vrManualGrenade.weaponIndex =
-                        selectedWeaponIndex;
-
-                    std::memcpy(
-                        g_vrManualGrenade.heldOrigin,
-                        currentOrigin,
-                        sizeof(
-                            g_vrManualGrenade.heldOrigin));
-
-                    std::memcpy(
-                        g_vrManualGrenade.heldAxis,
-                        currentAxis,
-                        sizeof(
-                            g_vrManualGrenade.heldAxis));
-
-                    g_vrLeftControllerForegripPressed = false;
-                    g_vrTwoHandWeaponTargetActive = false;
-                    loggedUsedPalmPose =
-                        currentOriginUsesPalmPose;
-                    logGrab = true;
+                    selectedSlot = VrManualGrenadeSlot::Tactical;
+                    selectedWeaponIndex = tacticalWeaponIndex;
+                    grabByRightHand = false;
                 }
-                else
+                else if (rightNearTactical &&
+                         rightGripPressed &&
+                         !g_vrPhysicalBodyRig.knifeDrawn)
                 {
-                    // Pulse the corresponding native button for one command
-                    // so COD4 can show its existing no-grenade hint.
-                    if (selectedSlot ==
-                        VrManualGrenadeSlot::Frag)
+                    selectedSlot = VrManualGrenadeSlot::Tactical;
+                    selectedWeaponIndex = tacticalWeaponIndex;
+                    grabByRightHand = true;
+                }
+                // Priority 2: Hip Belt Frag Grenade Pouch
+                else if (leftNearFrag &&
+                         gripUpdate.grabPressed &&
+                         !magazineOwnsLeftGrip &&
+                         !supportGripCandidate)
+                {
+                    selectedSlot = VrManualGrenadeSlot::Frag;
+                    selectedWeaponIndex = fragWeaponIndex;
+                    grabByRightHand = false;
+                }
+                else if (rightNearFrag &&
+                         rightGripPressed &&
+                         !g_vrPhysicalBodyRig.knifeDrawn)
+                {
+                    selectedSlot = VrManualGrenadeSlot::Frag;
+                    selectedWeaponIndex = fragWeaponIndex;
+                    grabByRightHand = true;
+                }
+
+                if (selectedSlot != VrManualGrenadeSlot::None)
+                {
+                    loggedSlot = selectedSlot;
+                    loggedWeaponIndex = selectedWeaponIndex;
+                    loggedLocalPosition[0] = localForward;
+                    loggedLocalPosition[1] = localLeft;
+                    loggedLocalPosition[2] = localUp;
+
+                    if (selectedWeaponIndex > 0)
                     {
-                        *fragHeld = true;
+                        VR_ClearManualGrenadeVelocityHistoryLocked();
+
+                        g_vrManualGrenade.stage =
+                            VrManualGrenadeStage::Holding;
+                        g_vrManualGrenade.slot =
+                            selectedSlot;
+                        g_vrManualGrenade.inWeaponHand =
+                            grabByRightHand;
+                        g_vrManualGrenade.weaponIndex =
+                            selectedWeaponIndex;
+                        s_rightReleasePendingMs = 0u;
+
+                        if (grabByRightHand)
+                        {
+                            std::memcpy(
+                                g_vrManualGrenade.heldOrigin,
+                                rightWorld,
+                                sizeof(g_vrManualGrenade.heldOrigin));
+                            std::memcpy(
+                                g_vrManualGrenade.heldAxis,
+                                rightAxisWorld,
+                                sizeof(g_vrManualGrenade.heldAxis));
+                            VR_ApplyRightControllerWeaponHaptic(0.48f, 0.055f);
+                            Com_Printf(
+                                0,
+                                "[VR][GRENADE] Weapon hand grabbed %s (slot %d) from %s.\n",
+                                selectedSlot == VrManualGrenadeSlot::Tactical ? "tactical flashbang" : "frag grenade",
+                                selectedWeaponIndex,
+                                selectedSlot == VrManualGrenadeSlot::Tactical ? "chest vest rig" : "hip belt pouch");
+                        }
+                        else
+                        {
+                            std::memcpy(
+                                g_vrManualGrenade.heldOrigin,
+                                currentOrigin,
+                                sizeof(g_vrManualGrenade.heldOrigin));
+                            std::memcpy(
+                                g_vrManualGrenade.heldAxis,
+                                currentAxis,
+                                sizeof(g_vrManualGrenade.heldAxis));
+                            VR_ApplyOffhandControllerHaptic(0.48f, 0.055f);
+                            g_vrLeftControllerForegripPressed = false;
+                            g_vrTwoHandWeaponTargetActive = false;
+                            Com_Printf(
+                                0,
+                                "[VR][GRENADE] Off hand grabbed %s (slot %d) from %s.\n",
+                                selectedSlot == VrManualGrenadeSlot::Tactical ? "tactical flashbang" : "frag grenade",
+                                selectedWeaponIndex,
+                                selectedSlot == VrManualGrenadeSlot::Tactical ? "chest vest rig" : "hip belt pouch");
+                        }
+
+                        logGrab = true;
                     }
                     else
                     {
-                        *tacticalHeld = true;
+                        if (selectedSlot == VrManualGrenadeSlot::Frag)
+                        {
+                            *fragHeld = true;
+                        }
+                        else
+                        {
+                            *tacticalHeld = true;
+                        }
+                        logEmptySlot = true;
                     }
-
-                    logEmptySlot = true;
                 }
             }
 
             if (g_vrManualGrenade.stage ==
                 VrManualGrenadeStage::Holding)
             {
-                if (poseValid)
-                {
-                    std::memcpy(
-                        g_vrManualGrenade.heldOrigin,
-                        currentOrigin,
-                        sizeof(
-                            g_vrManualGrenade.heldOrigin));
+                bool triggerRelease = false;
 
-                    std::memcpy(
-                        g_vrManualGrenade.heldAxis,
-                        currentAxis,
-                        sizeof(
-                            g_vrManualGrenade.heldAxis));
-                }
-
-                if (poseValid &&
-                    g_vrLeftControllerLinearVelocityValid)
+                if (g_vrManualGrenade.inWeaponHand)
                 {
-                    VR_RecordManualGrenadeVelocityLocked(
-                        nowMilliseconds,
-                        currentVelocity);
-                }
-
-                if (gripUpdate.release)
-                {
-                    if (insideLeftHip || insideRightHip)
+                    if (g_vrRightControllerWeaponPoseValid)
                     {
-                        // Released within belt pouch proximity radius: cancel and return grenade to belt
-                        VR_ResetManualGrenadeInteractionLocked();
-                        VR_ApplyOffhandControllerHaptic(0.22f, 0.035f);
-                        Com_Printf(
-                            0,
-                            "[VR][GRENADE] Released within belt pouch radius; returned grenade to pouch.\n");
+                        std::memcpy(
+                            g_vrManualGrenade.heldOrigin,
+                            rightWorld,
+                            sizeof(g_vrManualGrenade.heldOrigin));
+                        std::memcpy(
+                            g_vrManualGrenade.heldAxis,
+                            rightAxisWorld,
+                            sizeof(g_vrManualGrenade.heldAxis));
+
+                        if (g_vrRightControllerLinearVelocityValid)
+                        {
+                            VR_RecordManualGrenadeVelocityLocked(
+                                nowMilliseconds,
+                                rightVelocity);
+                        }
+                    }
+
+                    // 120ms stickiness threshold debounce for right hand
+                    if (!rightSqueezeHeld)
+                    {
+                        if (s_rightReleasePendingMs == 0u)
+                        {
+                            s_rightReleasePendingMs = nowMilliseconds + 120u;
+                        }
+                        else if (nowMilliseconds >= s_rightReleasePendingMs)
+                        {
+                            triggerRelease = true;
+                            s_rightReleasePendingMs = 0u;
+                        }
                     }
                     else
                     {
+                        s_rightReleasePendingMs = 0u;
+                    }
+                }
+                else
+                {
+                    if (poseValid)
+                    {
+                        std::memcpy(
+                            g_vrManualGrenade.heldOrigin,
+                            currentOrigin,
+                            sizeof(g_vrManualGrenade.heldOrigin));
+                        std::memcpy(
+                            g_vrManualGrenade.heldAxis,
+                            currentAxis,
+                            sizeof(g_vrManualGrenade.heldAxis));
+
+                        if (g_vrLeftControllerLinearVelocityValid)
+                        {
+                            VR_RecordManualGrenadeVelocityLocked(
+                                nowMilliseconds,
+                                currentVelocity);
+                        }
+                    }
+
+                    triggerRelease = gripUpdate.release;
+                }
+
+                if (triggerRelease)
+                {
+                    const float distToTactical =
+                        dist3(g_vrManualGrenade.heldOrigin, tacticalPouchOrigin);
+                    const float distToFrag =
+                        dist3(g_vrManualGrenade.heldOrigin, grenadePouchOrigin);
+
+                    // Check proximity return: cancel throw and stow item back into pouch
+                    if (g_vrManualGrenade.slot == VrManualGrenadeSlot::Tactical &&
+                        distToTactical <= 8.8f)
+                    {
+                        VR_ResetManualGrenadeInteractionLocked();
+                        if (g_vrManualGrenade.inWeaponHand)
+                        {
+                            VR_ApplyRightControllerWeaponHaptic(0.24f, 0.035f);
+                        }
+                        else
+                        {
+                            VR_ApplyOffhandControllerHaptic(0.24f, 0.035f);
+                        }
+                        Com_Printf(
+                            0,
+                            "[VR][GRENADE] Released within chest tactical pouch radius; returned flashbang to vest.\n");
+                    }
+                    else if (g_vrManualGrenade.slot == VrManualGrenadeSlot::Frag &&
+                             (distToFrag <= 8.8f || insideLeftHip || insideRightHip))
+                    {
+                        VR_ResetManualGrenadeInteractionLocked();
+                        if (g_vrManualGrenade.inWeaponHand)
+                        {
+                            VR_ApplyRightControllerWeaponHaptic(0.24f, 0.035f);
+                        }
+                        else
+                        {
+                            VR_ApplyOffhandControllerHaptic(0.24f, 0.035f);
+                        }
+                        Com_Printf(
+                            0,
+                            "[VR][GRENADE] Released within belt pouch radius; returned frag grenade to pouch.\n");
+                    }
+                    else
+                    {
+                        // Commit the throw!
                         std::memcpy(
                             g_vrManualGrenade.releaseOrigin,
                             g_vrManualGrenade.heldOrigin,
-                            sizeof(
-                                g_vrManualGrenade.releaseOrigin));
+                            sizeof(g_vrManualGrenade.releaseOrigin));
 
                         if (!VR_SelectManualGrenadeReleaseVelocityLocked(
                                 nowMilliseconds,
                                 g_vrManualGrenade.releaseVelocity,
-                                &g_vrManualGrenade
-                                    .releaseVelocitySampleAgeMilliseconds))
+                                &g_vrManualGrenade.releaseVelocitySampleAgeMilliseconds))
                         {
                             g_vrManualGrenade.releaseVelocity[0] = 0.0f;
                             g_vrManualGrenade.releaseVelocity[1] = 0.0f;
                             g_vrManualGrenade.releaseVelocity[2] = 0.0f;
                         }
 
-                        // The server uses this only when the physical sample has
-                        // too little horizontal motion to establish a stable
-                        // direction.  It is the release-time view forward, not a
-                        // later camera orientation.
                         std::memcpy(
                             g_vrManualGrenade.releaseFallbackForward,
                             cameraAxis[0],
-                            sizeof(
-                                g_vrManualGrenade.releaseFallbackForward));
+                            sizeof(g_vrManualGrenade.releaseFallbackForward));
 
                         g_vrManualGrenade.stage =
                             VrManualGrenadeStage::ReleasedPending;
-
                         g_vrManualGrenade.releasedAtMilliseconds =
                             nowMilliseconds;
-
                         g_vrManualGrenade.pendingUntilMilliseconds =
                             nowMilliseconds + 3000u;
-
                         g_vrManualGrenade.viewOverrideUntilMilliseconds =
                             nowMilliseconds + 3000u;
 
@@ -19375,24 +19641,26 @@ bool VR_UpdateManualGrenadeInput(
                             loggedReleaseOrigin,
                             g_vrManualGrenade.releaseOrigin,
                             sizeof(loggedReleaseOrigin));
-
                         std::memcpy(
                             loggedReleaseVelocity,
                             g_vrManualGrenade.releaseVelocity,
                             sizeof(loggedReleaseVelocity));
 
                         loggedVelocitySampleAgeMilliseconds =
-                            g_vrManualGrenade
-                                .releaseVelocitySampleAgeMilliseconds;
-
-                        loggedSlot =
-                            g_vrManualGrenade.slot;
-
-                        loggedWeaponIndex =
-                            g_vrManualGrenade.weaponIndex;
-
+                            g_vrManualGrenade.releaseVelocitySampleAgeMilliseconds;
+                        loggedSlot = g_vrManualGrenade.slot;
+                        loggedWeaponIndex = g_vrManualGrenade.weaponIndex;
                         logRelease = true;
                         loggedReleasePoseFallback = gripUpdate.lastValidPoseFallback;
+
+                        Com_Printf(
+                            0,
+                            "[VR][GRENADE] Committed manual throw for %s (weapon %d) at velocity (%.1f, %.1f, %.1f).\n",
+                            g_vrManualGrenade.slot == VrManualGrenadeSlot::Tactical ? "flashbang" : "frag grenade",
+                            g_vrManualGrenade.weaponIndex,
+                            g_vrManualGrenade.releaseVelocity[0],
+                            g_vrManualGrenade.releaseVelocity[1],
+                            g_vrManualGrenade.releaseVelocity[2]);
                     }
                 }
                 else if (g_vrManualGrenade.slot ==
@@ -19405,14 +19673,20 @@ bool VR_UpdateManualGrenadeInput(
                     *tacticalHeld = true;
                 }
 
-                g_vrLeftControllerForegripPressed = false;
-                g_vrTwoHandWeaponTargetActive = false;
+                if (!g_vrManualGrenade.inWeaponHand)
+                {
+                    g_vrLeftControllerForegripPressed = false;
+                    g_vrTwoHandWeaponTargetActive = false;
+                }
             }
             else if (g_vrManualGrenade.stage ==
                      VrManualGrenadeStage::ReleasedPending)
             {
-                g_vrLeftControllerForegripPressed = false;
-                g_vrTwoHandWeaponTargetActive = false;
+                if (!g_vrManualGrenade.inWeaponHand)
+                {
+                    g_vrLeftControllerForegripPressed = false;
+                    g_vrTwoHandWeaponTargetActive = false;
+                }
             }
 
         }
