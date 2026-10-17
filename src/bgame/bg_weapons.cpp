@@ -2210,6 +2210,19 @@ void __cdecl PM_Weapon_CheckForReload(pmove_t *pm)
                     ps,
                     EV_RELOAD_ADDAMMO);
 
+                PM_AddEvent(
+                    ps,
+                    EV_RELOAD_END);
+
+                PM_AddEvent(
+                    ps,
+                    EV_RECHAMBER_WEAPON);
+
+                Com_BitClearAssert(
+                    ps->weaponrechamber,
+                    ps->weapon,
+                    16);
+
                 ps->weaponTime = 0;
                 ps->weaponDelay = 0;
                 ps->weaponstate = WEAPON_READY;

@@ -7618,6 +7618,70 @@ static void VR_AddManualGrenadeModelToScene(
         0.0f);
 }
 
+static XModel* VR_ResolveWeaponClipModel(const WeaponDef* weapDef)
+{
+    if (weapDef == nullptr)
+    {
+        return nullptr;
+    }
+
+    if (weapDef->worldClipModel != nullptr)
+    {
+        return weapDef->worldClipModel;
+    }
+
+    // Pistols and some other weapons in COD4 do not specify a worldClipModel.
+    // Try candidate clip models that exist in fastfile or registered assets.
+    static const char* const kClipCandidates[] = {
+        "weapon_colt45_clip",
+        "weapon_m9_clip",
+        "weapon_beretta_clip",
+        "weapon_usp_clip",
+        "weapon_deserteagle_clip",
+        "weapon_mini_uzi_clip",
+        "weapon_mp5_clip",
+        "weapon_m4_clip",
+        "weapon_ak47_clip",
+    };
+
+    for (const char* candidateName : kClipCandidates)
+    {
+        if (IsFastFileLoad())
+        {
+            if (DB_FindXAssetEntry(ASSET_TYPE_XMODEL, candidateName) != nullptr)
+            {
+                XModel* model = R_RegisterModel(candidateName);
+                if (model != nullptr && model->numsurfs > 0 && model->surfs != nullptr)
+                {
+                    return model;
+                }
+            }
+        }
+        else
+        {
+            XModel* model = R_RegisterModel(candidateName);
+            if (model != nullptr && model->numsurfs > 0 && model->surfs != nullptr)
+            {
+                return model;
+            }
+        }
+    }
+
+    // Fallback: scan any loaded weapon definition in the current game session
+    // that has a valid worldClipModel.
+    const uint32_t totalWeapons = BG_GetNumWeapons();
+    for (uint32_t w = 1u; w < totalWeapons; ++w)
+    {
+        const WeaponDef* otherDef = BG_GetWeaponDef(w);
+        if (otherDef != nullptr && otherDef->worldClipModel != nullptr)
+        {
+            return otherDef->worldClipModel;
+        }
+    }
+
+    return nullptr;
+}
+
 static void VR_AddManualReloadClipModelsToScene(
     const uint32_t weaponNum,
     XModel* clipModel,
@@ -8346,6 +8410,8 @@ struct VrBodyRigRenderView
     float grenadePouchAxis[3][3] = {};
     float tacticalPouchOrigin[3] = {};
     float tacticalPouchAxis[3][3] = {};
+    float secMagPouchOrigin[3] = {};
+    float secMagPouchAxis[3][3] = {};
     bool knifeDrawn = false;
     // 1 = knife is in the weapon hand, 0 = knife is in the off hand.
     int knifeHandIndex = 0;
@@ -8393,7 +8459,9 @@ static bool VR_QueryBodyRigRenderView(
             view->heldKnifeOrigin,
             view->heldKnifeAxis,
             view->tacticalPouchOrigin,
-            view->tacticalPouchAxis))
+            view->tacticalPouchAxis,
+            view->secMagPouchOrigin,
+            view->secMagPouchAxis))
     {
         return false;
     }
@@ -9309,17 +9377,74 @@ static void VR_AddPhysicalBodyRigToScene(
 
     // 4. Render Spare Magazine in the Hip Magazine Pouch.
     const int ammoIndex = weaponNum > 0u ? BG_AmmoForWeapon(weaponNum) : -1;
-    if (weapDef != nullptr &&
-        weapDef->worldClipModel != nullptr &&
+    XModel* primaryClipModel = weapDef != nullptr ? VR_ResolveWeaponClipModel(weapDef) : nullptr;
+    if (primaryClipModel != nullptr &&
         ammoIndex >= 0 &&
         ps->ammo[ammoIndex] > 0)
     {
         VR_SubmitBodyHolsterPropToScene(
             &s_vrHolsteredSpareMagObject,
-            weapDef->worldClipModel,
+            primaryClipModel,
             bodyState.magPouchOrigin,
             bodyState.magPouchAxis,
             lightingOrigin);
+    }
+
+    // 4b. Render Secondary Magazine in the Dedicated Secondary Magazine Holder.
+    static VrHolsteredPropRenderObject s_vrHolsteredSecMagObject;
+    uint32_t secondaryWeaponNum = 0u;
+    const WeaponDef* secondaryDef = nullptr;
+    XModel* secondaryClipModel = nullptr;
+
+    for (uint32_t candIdx = 1u; candIdx < totalWeapons; ++candIdx)
+    {
+        if (candIdx == weaponNum)
+        {
+            continue;
+        }
+        if (!Com_BitCheckAssert(ps->weapons, candIdx, 16))
+        {
+            continue;
+        }
+        const WeaponDef* candDef = BG_GetWeaponDef(candIdx);
+        if (candDef == nullptr ||
+            candDef->inventoryType == WEAPINVENTORY_ALTMODE ||
+            candDef->inventoryType == WEAPINVENTORY_ITEM ||
+            candDef->inventoryType == WEAPINVENTORY_OFFHAND)
+        {
+            continue;
+        }
+        if (candDef->weapType != WEAPTYPE_BULLET)
+        {
+            continue;
+        }
+
+        if (secondaryWeaponNum == 0u ||
+            (weapDef != nullptr && weapDef->weapClass != WEAPCLASS_PISTOL && candDef->weapClass == WEAPCLASS_PISTOL) ||
+            (weapDef != nullptr && weapDef->weapClass == WEAPCLASS_PISTOL && candDef->weapClass != WEAPCLASS_PISTOL))
+        {
+            secondaryWeaponNum = candIdx;
+            secondaryDef = candDef;
+        }
+    }
+
+    if (secondaryDef != nullptr)
+    {
+        secondaryClipModel = VR_ResolveWeaponClipModel(secondaryDef);
+    }
+
+    if (secondaryClipModel != nullptr && secondaryWeaponNum > 0u)
+    {
+        const int secAmmoIndex = BG_AmmoForWeapon(secondaryWeaponNum);
+        if (secAmmoIndex >= 0 && ps->ammo[secAmmoIndex] > 0)
+        {
+            VR_SubmitBodyHolsterPropToScene(
+                &s_vrHolsteredSecMagObject,
+                secondaryClipModel,
+                bodyState.secMagPouchOrigin,
+                bodyState.secMagPouchAxis,
+                lightingOrigin);
+        }
     }
 
     // 5. Render Frag Grenade on the Belt Pouch (unless currently held in hand).
@@ -10450,17 +10575,21 @@ void __cdecl CG_AddPlayerWeapon(
                     weapDef->weapClass == WEAPCLASS_PISTOL ||
                     weapDef->weapClass == WEAPCLASS_MG;
 
+                XModel* resolvedClipModel = VR_ResolveWeaponClipModel(weapDef);
                 const bool detachableMagazineWeapon =
-                    weapDef->worldClipModel != nullptr &&
+                    resolvedClipModel != nullptr &&
                     weapDef->weapType == WEAPTYPE_BULLET &&
                     detachableMagazineClass &&
                     !weapDef->bSegmentedReload;
 
                 const uint32_t magazineTagCandidates[] = {
                     scr_const.tag_clip,
+                    SL_FindString("tag_clip"),
                     SL_FindString("tag_mag"),
                     SL_FindString("tag_magazine"),
                     SL_FindString("tag_clip_animate"),
+                    SL_FindString("j_mag"),
+                    SL_FindString("j_clip"),
                 };
 
                 float magazineWellOrigin[3] = {};
@@ -10503,14 +10632,63 @@ void __cdecl CG_AddPlayerWeapon(
                             break;
                         }
                     }
+
+                    if (!foundMagazineWell)
+                    {
+                        const uint32_t gripTagCandidates[] = {
+                            scr_const.tag_weapon,
+                            SL_FindString("tag_weapon"),
+                            SL_FindString("tag_weapon_right"),
+                            SL_FindString("j_gun"),
+                        };
+
+                        float gripOrigin[3] = {};
+                        float gripAxis[3][3] = {};
+
+                        for (const uint32_t gripTag : gripTagCandidates)
+                        {
+                            if (gripTag == 0u)
+                            {
+                                continue;
+                            }
+                            if (CG_DObjGetWorldTagMatrix(
+                                    &cgameGlob->viewModelPose,
+                                    weapInfo->viewModelDObj,
+                                    gripTag,
+                                    gripAxis,
+                                    gripOrigin))
+                            {
+                                const float downOffset =
+                                    weapDef->weapClass == WEAPCLASS_PISTOL ? 4.5f : 6.0f;
+                                const float fwdOffset =
+                                    weapDef->weapClass == WEAPCLASS_PISTOL ? -0.8f : 1.5f;
+                                for (int c = 0; c < 3; ++c)
+                                {
+                                    magazineWellOrigin[c] =
+                                        gripOrigin[c] -
+                                        cgameGlob->viewModelAxis[2][c] * downOffset +
+                                        cgameGlob->viewModelAxis[0][c] * fwdOffset;
+                                }
+                                std::memcpy(
+                                    magazineWellAxis,
+                                    cgameGlob->viewModelAxis,
+                                    sizeof(magazineWellAxis));
+                                foundMagazineWell = true;
+                                break;
+                            }
+                        }
+                    }
                 }
 
                 const uint32_t boltTagCandidates[] = {
+                    SL_FindString("j_slide"),
+                    SL_FindString("tag_slide"),
                     SL_FindString("j_bolt"),
                     SL_FindString("tag_bolt"),
-                    SL_FindString("j_slide"),
                     SL_FindString("j_charging_handle"),
+                    SL_FindString("tag_charging_handle"),
                     scr_const.tag_brass,
+                    SL_FindString("tag_brass"),
                 };
 
                 float boltAnchorOrigin[3] = {};
@@ -10519,6 +10697,8 @@ void __cdecl CG_AddPlayerWeapon(
                     {0.0f, 1.0f, 0.0f},
                     {0.0f, 0.0f, 1.0f},
                 };
+                uint8_t activeBoltBoneIndex = 0u;
+                bool foundSlideBone = false;
                 bool foundBoltAnchor = false;
 
                 if (detachableMagazineWeapon)
@@ -10542,6 +10722,12 @@ void __cdecl CG_AddPlayerWeapon(
                                 boltAnchorAxis,
                                 boltAnchorOrigin))
                         {
+                            activeBoltBoneIndex = candidateBoltBoneIndex;
+                            if (boltTag != scr_const.tag_brass &&
+                                boltTag != SL_FindString("tag_brass"))
+                            {
+                                foundSlideBone = true;
+                            }
                             foundBoltAnchor = true;
                             break;
                         }
@@ -10549,18 +10735,43 @@ void __cdecl CG_AddPlayerWeapon(
 
                     if (!foundBoltAnchor && foundMagazineWell)
                     {
+                        const float forwardOffset =
+                            weapDef->weapClass == WEAPCLASS_PISTOL ? -1.0f : -1.8f;
+                        const float upOffset =
+                            weapDef->weapClass == WEAPCLASS_PISTOL ? 3.8f : 3.2f;
                         for (int c = 0; c < 3; ++c)
                         {
                             boltAnchorOrigin[c] =
-                                magazineWellOrigin[c] -
-                                magazineWellAxis[0][c] * 1.8f +
-                                magazineWellAxis[2][c] * 3.2f;
+                                magazineWellOrigin[c] +
+                                cgameGlob->viewModelAxis[0][c] * forwardOffset +
+                                cgameGlob->viewModelAxis[2][c] * upOffset;
                         }
-                        std::memcpy(
-                            boltAnchorAxis,
-                            magazineWellAxis,
-                            sizeof(boltAnchorAxis));
                         foundBoltAnchor = true;
+                    }
+                }
+
+                float slideTravelInches = 2.0f;
+                if (weapDef != nullptr)
+                {
+                    switch (weapDef->weapClass)
+                    {
+                        case WEAPCLASS_PISTOL:
+                            slideTravelInches = 1.30f;
+                            break;
+                        case WEAPCLASS_SMG:
+                            slideTravelInches = 1.85f;
+                            break;
+                        case WEAPCLASS_RIFLE:
+                        case WEAPCLASS_MG:
+                            slideTravelInches = 2.35f;
+                            break;
+                        case WEAPCLASS_SNIPER:
+                        case WEAPCLASS_SHOTGUN:
+                            slideTravelInches = 2.80f;
+                            break;
+                        default:
+                            slideTravelInches = 2.0f;
+                            break;
                     }
                 }
 
@@ -10569,7 +10780,8 @@ void __cdecl CG_AddPlayerWeapon(
                     VR_PublishWeaponBoltAnchorWorld(
                         static_cast<int>(weaponNum),
                         boltAnchorOrigin,
-                        boltAnchorAxis);
+                        cgameGlob->viewModelAxis,
+                        slideTravelInches);
                 }
 
                 const int clipIndex =
@@ -10631,6 +10843,55 @@ void __cdecl CG_AddPlayerWeapon(
                     &boltPullFraction,
                     boltHandOrigin,
                     boltHandAxis);
+
+                if (foundSlideBone && activeBoltBoneIndex > 0u && boltPullFraction > 0.0f)
+                {
+                    DObjAnimMat* slideMat = CG_DObjGetLocalBoneMatrix(
+                        &cgameGlob->viewModelPose,
+                        weapInfo->viewModelDObj,
+                        activeBoltBoneIndex);
+                    if (slideMat != nullptr)
+                    {
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            slideMat->trans[c] -=
+                                cgameGlob->viewModelAxis[0][c] *
+                                (boltPullFraction * slideTravelInches);
+                        }
+                    }
+                }
+
+                if (VR_ConsumeManualReloadBoltRackSoundPending(static_cast<int>(weaponNum)))
+                {
+                    if (weapDef->rechamberSoundPlayer != nullptr)
+                    {
+                        CG_PlayEntitySoundAlias(
+                            0,
+                            cgameGlob->playerEntity.nextState.number,
+                            weapDef->rechamberSoundPlayer);
+                    }
+                    else if (weapDef->reloadEndSoundPlayer != nullptr)
+                    {
+                        CG_PlayEntitySoundAlias(
+                            0,
+                            cgameGlob->playerEntity.nextState.number,
+                            weapDef->reloadEndSoundPlayer);
+                    }
+                    else if (weapDef->pullbackSoundPlayer != nullptr)
+                    {
+                        CG_PlayEntitySoundAlias(
+                            0,
+                            cgameGlob->playerEntity.nextState.number,
+                            weapDef->pullbackSoundPlayer);
+                    }
+                    else if (weapDef->reloadEmptySoundPlayer != nullptr)
+                    {
+                        CG_PlayEntitySoundAlias(
+                            0,
+                            cgameGlob->playerEntity.nextState.number,
+                            weapDef->reloadEmptySoundPlayer);
+                    }
+                }
 
                 VrBodyRigRenderView bodyRigState = {};
                 const bool bodyRigValid =
@@ -10760,7 +11021,7 @@ void __cdecl CG_AddPlayerWeapon(
 
                 VR_AddManualReloadClipModelsToScene(
                     weaponNum,
-                    weapDef->worldClipModel,
+                    resolvedClipModel,
                     manualReloadLightingOrigin);
 
                 VR_AddManualGrenadeModelToScene(

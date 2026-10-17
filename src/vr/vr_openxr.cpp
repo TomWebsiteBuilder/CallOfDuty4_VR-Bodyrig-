@@ -2516,6 +2516,8 @@ struct VrManualMagazineReloadState
         {0.0f, 1.0f, 0.0f},
         {0.0f, 0.0f, 1.0f},
     };
+    float slideTravelInches = 2.0f;
+    bool boltRackSoundPending = false;
 };
 
 VrManualMagazineReloadState
@@ -17628,6 +17630,30 @@ void VR_UpdateManualMagazineReload(
             g_vrLeftControllerForegripPosition[2] >=
                 beltMinimumUp;
 
+        const float secMagHipCenter = magazineHipCenter * 0.58f;
+        const float secMagHipMinimum =
+            secMagHipCenter - configurable.beltGrabRadius;
+        const float secMagHipMaximum =
+            secMagHipCenter + configurable.beltGrabRadius;
+
+        const bool offhandGripAtSecMagHip =
+            g_vrLeftControllerForegripPoseValid &&
+            g_vrLeftControllerForegripPosition[0] >=
+                -10.0f + configurable.beltForwardOffset &&
+            g_vrLeftControllerForegripPosition[0] <=
+                26.0f + configurable.beltForwardOffset &&
+            g_vrLeftControllerForegripPosition[1] >=
+                secMagHipMinimum &&
+            g_vrLeftControllerForegripPosition[1] <=
+                secMagHipMaximum &&
+            g_vrLeftControllerForegripPosition[2] <=
+                beltMaximumUp &&
+            g_vrLeftControllerForegripPosition[2] >=
+                beltMinimumUp;
+
+        const bool offhandGripAtAnyMagHolder =
+            offhandGripAtMagazineHip || offhandGripAtSecMagHip;
+
         const float loadedMagazineDelta[3] = {
             leftGripWorld[0] - magazineWellOrigin[0],
             leftGripWorld[1] - magazineWellOrigin[1],
@@ -17728,7 +17754,7 @@ void VR_UpdateManualMagazineReload(
               g_vrManualMagazineReload.stage ==
                   VrManualMagazineReloadStage::Ready)) &&
             (squeezePressedEdge || (leftSqueezeHeld && !g_vrLeftControllerForegripPressed)) &&
-            offhandGripAtMagazineHip)
+            offhandGripAtAnyMagHolder)
         {
             const bool oldMagInWeapon =
                 g_vrManualMagazineReload.stage ==
@@ -18031,7 +18057,8 @@ void VR_UpdateManualMagazineReload(
                 g_vrManualMagazineReload.boltPullFraction = 0.0f;
                 g_vrManualMagazineReload.heldPoseValid = false;
                 g_vrManualMagazineReload.commitUntilMilliseconds =
-                    nowMilliseconds + 400u;
+                    nowMilliseconds + 450u;
+                g_vrManualMagazineReload.boltRackSoundPending = true;
                 VR_ApplyRightControllerWeaponHaptic(0.32f, 0.040f);
                 Com_Printf(
                     0,
@@ -18060,14 +18087,17 @@ void VR_UpdateManualMagazineReload(
                     (boltAnchorWorld[2] - leftGripWorld[2]) *
                         boltAxisWorld[0][2];
                 const float effectivePull =
-                    (std::max)(0.0f, (std::max)(pullFromStart, pullFromAnchor - 0.35f));
-                constexpr float kRequiredBoltPullInches = 2.35f;
+                    (std::max)(0.0f, (std::max)(pullFromStart, pullFromAnchor));
+                const float requiredBoltPullInches =
+                    g_vrManualMagazineReload.slideTravelInches > 0.5f
+                        ? g_vrManualMagazineReload.slideTravelInches
+                        : 2.0f;
                 g_vrManualMagazineReload.boltPullFraction =
                     (std::max)(
                         0.0f,
                         (std::min)(
                             1.0f,
-                            effectivePull / kRequiredBoltPullInches));
+                            effectivePull / requiredBoltPullInches));
 
                 // Lock off-hand glove attachment cleanly along charging handle / slide travel line
                 for (int c = 0; c < 3; ++c)
@@ -18075,7 +18105,7 @@ void VR_UpdateManualMagazineReload(
                     g_vrManualMagazineReload.heldOrigin[c] =
                         boltAnchorWorld[c] -
                         boltAxisWorld[0][c] *
-                            (g_vrManualMagazineReload.boltPullFraction * kRequiredBoltPullInches);
+                            (g_vrManualMagazineReload.boltPullFraction * requiredBoltPullInches);
                 }
                 std::memcpy(
                     g_vrManualMagazineReload.heldAxis,
@@ -18084,16 +18114,17 @@ void VR_UpdateManualMagazineReload(
                 g_vrManualMagazineReload.heldPoseValid = true;
             }
 
-            if (g_vrManualMagazineReload.boltPullFraction >= 1.0f ||
+            if (g_vrManualMagazineReload.boltPullFraction >= 0.85f ||
                 (squeezeReleasedEdge &&
-                 g_vrManualMagazineReload.boltPullFraction >= 0.65f))
+                 g_vrManualMagazineReload.boltPullFraction >= 0.45f))
             {
                 g_vrManualMagazineReload.stage =
                     VrManualMagazineReloadStage::Ready;
                 g_vrManualMagazineReload.boltPullFraction = 0.0f;
                 g_vrManualMagazineReload.heldPoseValid = false;
                 g_vrManualMagazineReload.commitUntilMilliseconds =
-                    nowMilliseconds + 400u;
+                    nowMilliseconds + 450u;
+                g_vrManualMagazineReload.boltRackSoundPending = true;
                 VR_ApplyOffhandControllerHaptic(0.45f, 0.045f);
                 VR_ApplyRightControllerWeaponHaptic(0.35f, 0.040f);
                 Com_Printf(
@@ -18365,7 +18396,8 @@ bool VR_IsManualMagazineReloadCommitActive(
 void VR_PublishWeaponBoltAnchorWorld(
     const int weaponIndex,
     const float boltOrigin[3],
-    const float boltAxis[3][3])
+    const float boltAxis[3][3],
+    const float slideTravelInches)
 {
     if (boltOrigin == nullptr ||
         boltAxis == nullptr)
@@ -18391,6 +18423,27 @@ void VR_PublishWeaponBoltAnchorWorld(
         boltAxis,
         sizeof(g_vrManualMagazineReload.boltAnchorAxis));
     g_vrManualMagazineReload.boltAnchorValid = true;
+    g_vrManualMagazineReload.slideTravelInches = slideTravelInches;
+}
+
+
+bool VR_ConsumeManualReloadBoltRackSoundPending(
+    const int weaponIndex)
+{
+    std::lock_guard<std::mutex> lock(
+        g_vrWeaponControllerPoseMutex);
+
+    if (!g_vrManualMagazineReload.enabled ||
+        g_vrManualMagazineReload.weaponIndex !=
+            weaponIndex)
+    {
+        return false;
+    }
+
+    const bool pending =
+        g_vrManualMagazineReload.boltRackSoundPending;
+    g_vrManualMagazineReload.boltRackSoundPending = false;
+    return pending;
 }
 
 
@@ -18476,7 +18529,9 @@ static void VR_ComputeBodyRigAnchorsWorld(
     float grenadePouchOrigin[3],
     float grenadePouchAxis[3][3],
     float tacticalPouchOrigin[3] = nullptr,
-    float tacticalPouchAxis[3][3] = nullptr)
+    float tacticalPouchAxis[3][3] = nullptr,
+    float secMagPouchOrigin[3] = nullptr,
+    float secMagPouchAxis[3][3] = nullptr)
 {
     float levelForward[3] = {
         cameraAxis[0][0],
@@ -18696,6 +18751,21 @@ static void VR_ComputeBodyRigAnchorsWorld(
             tacticalPouchAxis[2][i] = levelUp[i];
         }
     }
+
+    if (secMagPouchOrigin != nullptr && secMagPouchAxis != nullptr)
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            secMagPouchOrigin[i] =
+                cameraOrigin[i] +
+                levelForward[i] * (6.5f + configurable.beltForwardOffset) +
+                levelLeft[i] * (magazineHipCenter * 0.58f) +
+                levelUp[i] * (configurable.beltHeight + 1.2f);
+            secMagPouchAxis[0][i] = levelForward[i];
+            secMagPouchAxis[1][i] = levelLeft[i];
+            secMagPouchAxis[2][i] = levelUp[i];
+        }
+    }
 }
 
 
@@ -18730,6 +18800,8 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
     float grenadePouchAxis[3][3] = {};
     float tacticalPouchOrigin[3] = {};
     float tacticalPouchAxis[3][3] = {};
+    float secMagPouchOrigin[3] = {};
+    float secMagPouchAxis[3][3] = {};
 
     VR_ComputeBodyRigAnchorsWorld(
         cameraOrigin,
@@ -18748,7 +18820,9 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
         grenadePouchOrigin,
         grenadePouchAxis,
         tacticalPouchOrigin,
-        tacticalPouchAxis);
+        tacticalPouchAxis,
+        secMagPouchOrigin,
+        secMagPouchAxis);
 
     bool hoverRightHaptic = false;
     bool hoverLeftHaptic = false;
@@ -18857,6 +18931,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
         const float distLeftChest = g_vrLeftControllerForegripPoseValid ? distance3(leftWorld, chestSlingOrigin) : 9999.0f;
         const float distLeftHip = g_vrLeftControllerForegripPoseValid ? distance3(leftWorld, hipHolsterOrigin) : 9999.0f;
         const float distLeftMagPouch = g_vrLeftControllerForegripPoseValid ? distance3(leftWorld, magPouchOrigin) : 9999.0f;
+        const float distLeftSecMagPouch = g_vrLeftControllerForegripPoseValid ? distance3(leftWorld, secMagPouchOrigin) : 9999.0f;
         const float distLeftGrenade = g_vrLeftControllerForegripPoseValid ? distance3(leftWorld, grenadePouchOrigin) : 9999.0f;
         const float distLeftTactical = g_vrLeftControllerForegripPoseValid ? distance3(leftWorld, tacticalPouchOrigin) : 9999.0f;
         const float distLeftMagWell = (g_vrLeftControllerForegripPoseValid && g_vrManualMagazineReload.supported)
@@ -18867,6 +18942,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
         const float distRightChest = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, chestSlingOrigin) : 9999.0f;
         const float distRightHip = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, hipHolsterOrigin) : 9999.0f;
         const float distRightMagPouch = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, magPouchOrigin) : 9999.0f;
+        const float distRightSecMagPouch = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, secMagPouchOrigin) : 9999.0f;
         const float distRightGrenade = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, grenadePouchOrigin) : 9999.0f;
         const float distRightTactical = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, tacticalPouchOrigin) : 9999.0f;
 
@@ -18898,6 +18974,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
             distLeftKnife < distLeftChest &&
             distLeftKnife < distLeftHip &&
             distLeftKnife < distLeftMagPouch &&
+            distLeftKnife < distLeftSecMagPouch &&
             distLeftKnife < distLeftGrenade &&
             distLeftKnife < distLeftTactical &&
             !leftInteractingWithWeapon;
@@ -18907,6 +18984,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
             distRightKnife < distRightChest &&
             distRightKnife < distRightHip &&
             distRightKnife < distRightMagPouch &&
+            distRightKnife < distRightSecMagPouch &&
             distRightKnife < distRightGrenade &&
             distRightKnife < distRightTactical;
 
@@ -19416,7 +19494,9 @@ bool VR_GetPhysicalBodyRigRenderState(
     float heldKnifeOrigin[3],
     float heldKnifeAxis[3][3],
     float tacticalPouchOrigin[3],
-    float tacticalPouchAxis[3][3])
+    float tacticalPouchAxis[3][3],
+    float secMagPouchOrigin[3],
+    float secMagPouchAxis[3][3])
 {
     if (cameraOrigin == nullptr ||
         cameraAxis == nullptr ||
@@ -19459,7 +19539,9 @@ bool VR_GetPhysicalBodyRigRenderState(
         grenadePouchOrigin,
         grenadePouchAxis,
         tacticalPouchOrigin,
-        tacticalPouchAxis);
+        tacticalPouchAxis,
+        secMagPouchOrigin,
+        secMagPouchAxis);
 
     std::lock_guard<std::mutex> lock(
         g_vrWeaponControllerPoseMutex);

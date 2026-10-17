@@ -537,7 +537,12 @@ bool VR_ShouldSuppressRightControllerBlockedMuzzleShot();
 void VR_PublishWeaponBoltAnchorWorld(
     int weaponIndex,
     const float boltOrigin[3],
-    const float boltAxis[3][3]);
+    const float boltAxis[3][3],
+    float slideTravelInches = 2.0f);
+
+// Returns true and resets the pending flag when physical bolt rack completion
+// or bolt catch release should trigger slide forward / cocking audio.
+bool VR_ConsumeManualReloadBoltRackSoundPending(int weaponIndex);
 
 // Returns the active manual bolt-rack reload state so cgame can animate the
 // weapon's bolt bone and attach the off-hand glove while racking.
@@ -589,7 +594,9 @@ bool VR_GetPhysicalBodyRigRenderState(
     float heldKnifeOrigin[3],
     float heldKnifeAxis[3][3],
     float tacticalPouchOrigin[3] = nullptr,
-    float tacticalPouchAxis[3][3] = nullptr);
+    float tacticalPouchAxis[3][3] = nullptr,
+    float secMagPouchOrigin[3] = nullptr,
+    float secMagPouchAxis[3][3] = nullptr);
 
 // Returns the authoritative world-space origin and blade/swing direction when
 // a physical 6DoF combat knife slash/stab triggers FireWeaponMelee.
