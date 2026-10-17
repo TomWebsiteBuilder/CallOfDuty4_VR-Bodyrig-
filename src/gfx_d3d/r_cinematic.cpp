@@ -1119,6 +1119,23 @@ void __cdecl R_Cinematic_DrawLetterbox_OptionalCinematic(bool drawCinematic, flo
     movieHeight = width * vidConfig.aspectRatioDisplayPixel / (float)1.7777778;
     if (height < (double)movieHeight)
         movieHeight = (float)vidConfig.displayHeight;
+#ifdef KISAK_SP
+    extern void VR_UpdatePackedUiScreenPlacement();
+    VR_UpdatePackedUiScreenPlacement();
+    if (scrPlaceFull.realViewportSize[0] > 0.0f &&
+        scrPlaceFull.realViewportSize[0] < width)
+    {
+        width = scrPlaceFull.realViewportSize[0];
+        if (scrPlaceFull.realViewportSize[1] > 0.0f)
+        {
+            height = scrPlaceFull.realViewportSize[1];
+        }
+        // scrPlaceFull maps the 4:3 virtual canvas (640x480) into one eye;
+        // a 16:9 movie occupies 360/480 = 0.75 of the height, leaving the
+        // top/bottom 12.5% letterbox margins for briefing text and load bar.
+        movieHeight = height * 0.75f;
+    }
+#endif
     letterboxHalfHeight = (height - movieHeight) * 0.5;
     color[0] = 0.0;
     color[1] = 0.0;

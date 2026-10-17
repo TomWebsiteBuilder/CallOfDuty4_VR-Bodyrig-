@@ -1667,6 +1667,11 @@ void __cdecl CL_CreateCmd(usercmd_s *result)
                 &vrUseHeld,
                 &vrReloadHeld))
         {
+            if (VR_IsPhysicalWeaponHolstered())
+            {
+                vrAdsHeld = false;
+            }
+
             if (vrAdsHeld)
             {
                 result->buttons |=
@@ -2067,6 +2072,7 @@ void __cdecl CL_CreateCmd(usercmd_s *result)
         VR_UpdateManualGrenadeInput(
             vrFragWeaponIndex,
             vrTacticalWeaponIndex,
+            clients[0].serverTime,
             vrGrenadeCgameGlob->refdef.vieworg,
             vrGrenadeCgameGlob->refdef.viewaxis,
             &vrManualGrenadesEnabled,
@@ -2216,7 +2222,9 @@ void __cdecl CL_CreateCmd(usercmd_s *result)
                 &vrMoveForward,
                 &vrMoveRight);
 
-        if (vrSprintHeld &&
+        // Sprint Collision Fix: Suppress VR_TransferHmdYawToBody while sprinting to prevent
+        // the player collision capsule from twisting into walls and catching on level geometry.
+        if (false && vrSprintHeld &&
             vrHmdMovementActive)
         {
             float vrBodyYawDeltaDegrees =
@@ -2441,7 +2449,7 @@ void __cdecl CL_CreateCmd(usercmd_s *result)
             clients[0].cgameUserCmdGunYaw =
                 vrGunYaw;
 
-            if (vrAttackPressed)
+            if (vrAttackPressed && !VR_IsPhysicalWeaponHolstered())
             {
                 bool vrMuzzleBlocked = false;
                 float vrMuzzleWorld[3] = {};

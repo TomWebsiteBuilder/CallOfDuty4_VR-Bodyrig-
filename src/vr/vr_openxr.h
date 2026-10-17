@@ -210,6 +210,12 @@ bool VR_GetRightControllerWeaponGripWorld(
     const float cameraAxis[3][3],
     float gripWorld[3]);
 
+bool VR_GetRightControllerGripWorld(
+    const float cameraOrigin[3],
+    const float cameraAxis[3][3],
+    float gripWorld[3],
+    float gripAxisWorld[3][3]);
+
 // Records proof that the final viewmodel grip-tag alignment reached the
 // calibrated target. This is called only after the corrected pose is rebuilt.
 void VR_ReportRightControllerWeaponGripAlignment(
@@ -384,7 +390,8 @@ void VR_UpdateManualMagazineReload(
     const float magazineWellOrigin[3],
     const float magazineWellAxis[3][3],
     const float cameraOrigin[3],
-    const float cameraAxis[3][3]);
+    const float cameraAxis[3][3],
+    bool emptyChamber = false);
 
 // Returns the two optional world-space clip poses rendered by cgame, plus
 // whether the loaded viewmodel magazine bone must be hidden.
@@ -409,20 +416,21 @@ bool VR_IsManualMagazineReloadCommitActive(
     int weaponIndex);
 
 // KISAK_SP_VR_MANUAL_GRENADE_THROW_V53
-// Advances the off-hand hip interaction and returns the native offhand
+// Advances either hand's pouch interaction and returns the native offhand
 // buttons that must remain held for COD4's existing cook/throw state machine.
 // The selected indices come from predicted player state; configurable belt
-// layout decides which physical hip owns frag versus flash/smoke.
+// layout decides the frag side; flash/smoke uses its own chest anchor.
 bool VR_UpdateManualGrenadeInput(
     int fragWeaponIndex,
     int tacticalWeaponIndex,
+    int commandTime,
     const float cameraOrigin[3],
     const float cameraAxis[3][3],
     bool* manualModeEnabled,
     bool* fragHeld,
     bool* tacticalHeld);
 
-// Returns the tracked grenade pose rendered in the off hand while grip is
+// Returns the tracked grenade pose rendered in the holding hand while grip is
 // held.  The model is resolved by cgame from weaponIndex.
 bool VR_GetManualGrenadeRenderState(
     int* weaponIndex,
@@ -441,6 +449,10 @@ bool VR_IsManualGrenadeHeldInWeaponHand();
 // is committed on the next simulation step.
 bool VR_IsManualGrenadeReleasePending(
     int weaponIndex);
+
+// Shared prediction and the SP server cancel native preparation/cooking
+// when this command belongs to a physical pouch return.
+bool VR_IsManualGrenadeReturnPending(int weaponIndex, int commandTime);
 
 // The SP listen server consumes exactly one release sample when EV_USE_OFFHAND
 // fires. Position, recent physical velocity, and the release-time view-forward
@@ -584,4 +596,91 @@ bool VR_GetPhysicalKnifeStrikeWorld(
 // Applies tactile blade impact haptics to whichever controller currently holds
 // the physical combat knife.
 void VR_NotifyPhysicalKnifeHit(bool hitSolidOrFlesh);
+
+// -------------------------------------------------------------------------
+// Smooth Turn & Locomotion Controls
+// -------------------------------------------------------------------------
+enum class VrTurnMode
+{
+    Snap,
+    Smooth,
+};
+
+void VR_SetTurnMode(VrTurnMode mode);
+VrTurnMode VR_GetTurnMode();
+void VR_SetSmoothTurnSpeed(float degreesPerSecond);
+float VR_GetSmoothTurnSpeed();
+
+// -------------------------------------------------------------------------
+// Virtual Gunstock / Aim Stabilization
+// -------------------------------------------------------------------------
+void VR_SetVirtualStockEnabled(bool enabled);
+bool VR_IsVirtualStockEnabled();
+
+// -------------------------------------------------------------------------
+// 3D Diegetic Compass Mode
+// -------------------------------------------------------------------------
+enum class VrCompassMode
+{
+    DiegeticWrist = 0,
+    FloatingWorld = 1,
+    HudOverlay = 2,
+    Disabled = 3,
+};
+
+void VR_SetCompassMode(VrCompassMode mode);
+VrCompassMode VR_GetCompassMode();
+
+// -------------------------------------------------------------------------
+// In-Game T-Pose Calibration Wizard (COD4 MW Briefing Themed)
+// -------------------------------------------------------------------------
+struct VrTPoseCalibrationTelemetry
+{
+    bool valid = false;
+    float standingEyeHeightInches = 60.0f;
+    float wingspanInches = 70.0f;
+    float armLengthInches = 28.0f;
+    float shoulderWidthInches = 18.0f;
+    float shoulderHeightInches = 54.0f;
+    float rigScaleFactor = 1.0f;
+};
+
+void VR_StartTPoseCalibration();
+bool VR_IsTPoseCalibrating();
+const VrTPoseCalibrationTelemetry& VR_GetTPoseTelemetry();
+
+// -------------------------------------------------------------------------
+// Operator Model Customization & Mission Skip Protocol
+// -------------------------------------------------------------------------
+void VR_SetPlayerFactionOverride(int faction);
+int VR_GetPlayerFactionOverride();
+void VR_CyclePlayerFactionOverride();
+bool VR_SkipToNextMission();
+
+// -------------------------------------------------------------------------
+// Seated vs. Standing Mode
+// -------------------------------------------------------------------------
+void VR_SetSeatedMode(bool seated);
+bool VR_IsSeatedMode();
+void VR_ToggleSeatedMode();
+
+// -------------------------------------------------------------------------
+// Holster Tethering / Hold-to-Grip
+// -------------------------------------------------------------------------
+void VR_SetHoldToGripEnabled(bool enabled);
+bool VR_IsHoldToGripEnabled();
+void VR_ToggleHoldToGrip();
+bool VR_IsPhysicalWeaponHolstered();
+
+// -------------------------------------------------------------------------
+// 3D Menu Laser Pointer & Selection
+// -------------------------------------------------------------------------
+bool VR_IsMenuLaserActive();
+void VR_GetMenuLaserScreenPos(float* outX, float* outY);
+bool VR_ConsumeMenuLaserClick();
+
+// -------------------------------------------------------------------------
+// Physical Grenade Pin Pull Mechanics
+// -------------------------------------------------------------------------
+bool VR_IsGrenadePinPulled();
 

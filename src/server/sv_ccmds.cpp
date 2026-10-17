@@ -373,6 +373,10 @@ void __cdecl SV_MapRestart(int savegame, int loadScripts)
     SaveGame *v6; // [sp+50h] [-40h] BYREF
 
     Com_SyncThreads();
+#ifdef KISAK_SP
+    extern void VR_FreeManualReloadClipRenderObjectsForShutdown();
+    VR_FreeManualReloadClipRenderObjectsForShutdown();
+#endif
     track_hunk_ClearToStart();
     integer = cl_paused->current.integer;
     sv_save_filename[0] = 0;

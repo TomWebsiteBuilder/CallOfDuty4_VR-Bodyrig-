@@ -706,6 +706,27 @@ void __cdecl Player_UpdateCursorHints(gentity_s *ent)
                                                 if (traceEnt->s.un1.scale != 255)
                                                     scale = traceEnt->s.un1.scale;
                                             }
+
+                                            if (VR_IsInitialized())
+                                            {
+                                                // Physics-Based Doors & Environmental Breach:
+                                                // Allow operators to physically push open doors and interactive trigger geometry
+                                                // simply by walking into them or contacting them physically in VR.
+                                                const float dx = ent->r.currentOrigin[0] - traceEnt->r.currentOrigin[0];
+                                                const float dy = ent->r.currentOrigin[1] - traceEnt->r.currentOrigin[1];
+                                                const float dz = ent->r.currentOrigin[2] - traceEnt->r.currentOrigin[2];
+                                                const float distSq = dx * dx + dy * dy + dz * dz;
+
+                                                if (distSq <= 64.0f * 64.0f)
+                                                {
+                                                    const float speedSq = ent->client->ps.velocity[0] * ent->client->ps.velocity[0] +
+                                                                          ent->client->ps.velocity[1] * ent->client->ps.velocity[1];
+                                                    if (speedSq > 12.0f * 12.0f || distSq <= 36.0f * 36.0f)
+                                                    {
+                                                        Player_UseEntity(ent, traceEnt);
+                                                    }
+                                                }
+                                            }
                                         }
                                         goto LABEL_47;
                                     case 2u:

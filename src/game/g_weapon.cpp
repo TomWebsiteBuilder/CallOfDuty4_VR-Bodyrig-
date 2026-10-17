@@ -234,13 +234,36 @@ gentity_s *__cdecl Weapon_Melee_internal(gentity_s *ent, weaponParms *wp, float 
     modelIndex = tr.modelIndex;
     partGroup = (hitLocation_t)tr.partGroup;
     v6 = G_rand();
+    int meleeDamage = damage + v6 % 5;
+#ifdef KISAK_SP
+    if (VR_IsInitialized() && ent->client)
+    {
+        if (VR_IsPhysicalKnifeHeld())
+        {
+            // Knife Lethality: Forceful thrust or dynamic swipe against enemy hitboxes
+            // results in an immediate, silent neutralisation (lethal kill).
+            meleeDamage = 99999;
+        }
+        else
+        {
+            // Gun Bashing (Muzzle/Stock Strikes): Map collision logic to weapon barrel, stock, and receiver.
+            // Blunt-force impacts against enemy hostiles register as non-lethal strikes that stagger the target.
+            meleeDamage = 40;
+            if (traceEnt->actor && traceEnt->health <= meleeDamage)
+            {
+                // Ensure target survives to play the stagger animation
+                traceEnt->health = meleeDamage + 1;
+            }
+        }
+    }
+#endif
     G_Damage(
         traceEnt,
         ent,
         ent,
         wp->forward,
         endpos,
-        damage + v6 % 5,
+        meleeDamage,
         0,
         7,
         0xFFFFFFFF,

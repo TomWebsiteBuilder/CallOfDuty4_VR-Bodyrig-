@@ -6,7 +6,7 @@
 #ifdef KISAK_MP
 #include <game_mp/g_main_mp.h>
 #elif KISAK_SP
-
+#include "vr/vr_openxr.h"
 #endif
 #include <cgame/cg_local.h>
 
@@ -159,6 +159,15 @@ void __cdecl PM_playerTrace(
     int32_t contentMask)
 {
     uint16_t EntityHitId; // ax
+
+#if defined(KISAK_SP) && defined(KISAK_OPENXR_ENABLED)
+    if (VR_IsInitialized())
+    {
+        // Strip artificial invisible playerclip (0x10000) and monsterclip (0x20000) barriers
+        // in VR so real geometry remains solid without artificial invisible walls snagging the player.
+        contentMask &= ~0x30000;
+    }
+#endif
 
     pmoveHandlers[pm->handler].trace(results, start, mins, maxs, end, passEntityNum, contentMask);
     if (results->startsolid && (results->contents & 0x2000000) != 0)
@@ -1291,6 +1300,21 @@ void __cdecl Pmove(pmove_t *pm)
     finalTime = pm->cmd.serverTime;
     if (finalTime >= ps->commandTime)
     {
+#ifdef KISAK_SP
+        // Use the original usercmd time, before the 66ms subdivision below.
+        // Otherwise an early substep can cook/throw before it reaches the
+        // timestamp of the pouch return. Do not consume this request: client
+        // prediction and the SP server must both cancel it without using ammo.
+        if (ps->pm_type < PM_DEAD &&
+            ps->weaponstate >= WEAPON_OFFHAND_INIT &&
+            ps->weaponstate <= WEAPON_OFFHAND_START &&
+            !BG_ThrowingBackGrenade(ps) &&
+            VR_IsManualGrenadeReturnPending(ps->offHandIndex, finalTime))
+        {
+            ps->grenadeTimeLeft = 0;
+            PM_Weapon_OffHandEnd(ps);
+        }
+#endif
         if (finalTime > ps->commandTime + 1000)
             ps->commandTime = finalTime - 1000;
         pm->numtouch = 0;

@@ -1418,6 +1418,9 @@ void __cdecl CG_Init(int localClientNum, int savegame)
     cg_s *cgameGlob = CG_GetLocalClientGlobals(localClientNum);
     cgs_t *cgs = CG_GetLocalClientStaticGlobals(localClientNum);
 
+    extern void VR_FreeManualReloadClipRenderObjectsForShutdown();
+    VR_FreeManualReloadClipRenderObjectsForShutdown();
+
     memset(cgs, 0, sizeof(cgs_t));
     memset(&cgDC, 0, sizeof(cgDC));
     memset(cg_weaponsArray[localClientNum], 0, sizeof(weaponInfo_s[128]));

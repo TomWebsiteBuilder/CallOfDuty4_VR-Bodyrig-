@@ -1,5 +1,30 @@
 project(KisakCOD-VR-Configurator LANGUAGES CXX)
 
+# The settings suite does not exercise the physical grenade state machine.
+# Keep this focused suite available in the same Windows build as the game.
+add_executable(KisakCOD-VR-Grenade-Tests ../../tests/grenade_interaction_tests.cpp)
+target_include_directories(KisakCOD-VR-Grenade-Tests PRIVATE ../../src)
+target_compile_features(KisakCOD-VR-Grenade-Tests PRIVATE cxx_std_17)
+
+# Embedded HLSL is otherwise only compiled when the game starts in VR.
+add_executable(KisakCOD-VR-Shader-Tests ../../tests/vr_shader_compile_tests.cpp)
+target_compile_features(KisakCOD-VR-Shader-Tests PRIVATE cxx_std_17)
+if(MSVC)
+    set_property(TARGET KisakCOD-VR-Shader-Tests PROPERTY MSVC_RUNTIME_LIBRARY
+        "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    target_compile_options(KisakCOD-VR-Shader-Tests PRIVATE /W4 /WX)
+endif()
+
+add_custom_target(KisakCOD-VR-Shader-Check
+    COMMAND $<TARGET_FILE:KisakCOD-VR-Shader-Tests>
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../src/vr/vr_openxr.cpp"
+    DEPENDS KisakCOD-VR-Shader-Tests
+    VERBATIM
+)
+if(NOT CMAKE_CROSSCOMPILING)
+    add_dependencies(KisakCOD-sp KisakCOD-VR-Shader-Check)
+endif()
+
 add_executable(
     KisakCOD-VR-Configurator
     WIN32

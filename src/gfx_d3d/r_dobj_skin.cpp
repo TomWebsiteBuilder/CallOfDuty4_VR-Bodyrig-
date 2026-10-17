@@ -59,8 +59,10 @@ int  R_PreSkinXSurface(
     iassert(surf);
     iassert(surfaceInfo);
 
-    // if not deformed, it isn't weighted
-    if (!surf->deformed && IsFastFileLoad() && surf->vertListCount == 1)
+    // if not deformed, it isn't weighted (runtime-split VR surfaces with
+    // zoneHandle 0xFFu use CPU-allocated index buffers and must not take the
+    // fastfile zone rigid path).
+    if (!surf->deformed && surf->zoneHandle != 0xFFu && IsFastFileLoad() && surf->vertListCount == 1)
     {
         surf->vertList = surf->vertList;
         rigidSurf = (GfxModelRigidSurface *)surfPos;

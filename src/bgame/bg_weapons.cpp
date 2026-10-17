@@ -1380,6 +1380,8 @@ void __cdecl PM_Weapon(pmove_t *pm, pml_t *pml)
         {
             PM_UpdateAimDownSightLerp(pm, pml);
             PM_UpdateHoldBreath(pm, pml);
+            // Physical VR pouch returns are applied in Pmove before command
+            // subdivision, so every substep sees the cancelled native state.
             if (!PM_UpdateGrenadeThrow(ps, pml))
             {
                 UpdatePendingTriggerPull(pm);
@@ -3563,6 +3565,18 @@ void __cdecl PM_Weapon_CheckForSprint(pmove_t *pm)
     iassert(pm);
     ps = pm->ps;
     iassert(ps);
+
+    if (VR_IsInitialized())
+    {
+        // In VR, the player's weapon is positioned in world space by tracked controllers.
+        // Sprinting should only move the player forward faster without triggering canned weapon lowering/swaying animations.
+        if (ps->weaponstate >= 22 && ps->weaponstate <= 24)
+        {
+            ps->weaponstate = WEAPON_READY;
+            PM_StartWeaponAnim(ps, 0);
+        }
+        return;
+    }
 
     if (pm->cmd.weapon
         && ps->weaponstate != WEAPON_FIRING

@@ -26,6 +26,7 @@
 #include "cl_scrn.h"
 #include <qcommon/com_bsp.h>
 #include <universal/profile.h>
+#include <vr/vr_openxr.h>
 
 enum MovieToPlayScriptOp : __int32
 {
@@ -278,7 +279,9 @@ void __cdecl CL_ShutdownDevGui()
 
 void __cdecl CL_ShutdownHunkUsers()
 {
+    extern void VR_FreeManualReloadClipRenderObjectsForShutdown();
     Com_SyncThreads();
+    VR_FreeManualReloadClipRenderObjectsForShutdown();
     CL_ShutdownCGame();
     if (cls.devGuiStarted)
     {
@@ -1404,6 +1407,16 @@ void __cdecl CL_Shutdown(int localClientNum)
         Cmd_RemoveCommand("+incAnimWeight");
         Cmd_RemoveCommand("+decAnimWeight");
         Cmd_RemoveCommand("cubemapShot");
+        Cmd_RemoveCommand("vr_calibrate");
+        Cmd_RemoveCommand("vr_skip_mission");
+        Cmd_RemoveCommand("vr_skipMission");
+        Cmd_RemoveCommand("vr_cycle_model");
+        Cmd_RemoveCommand("vr_cycleModel");
+        Cmd_RemoveCommand("vr_stock_toggle");
+        Cmd_RemoveCommand("vr_compass_toggle");
+        Cmd_RemoveCommand("vr_turn_toggle");
+        Cmd_RemoveCommand("vr_seated_toggle");
+        Cmd_RemoveCommand("vr_hold_toggle");
         clientUIActives[0].isRunning = 0;
         recursive = 0;
         memset(&cls, 0, sizeof(cls));
@@ -1674,6 +1687,15 @@ void __cdecl CL_DrawLogo()
 
     float screenWidth = (float)cls.vidConfig.displayWidth;
     float screenHeight = (float)cls.vidConfig.displayHeight;
+    if (scrPlaceFull.realViewportSize[0] > 0.0f &&
+        scrPlaceFull.realViewportSize[0] < screenWidth)
+    {
+        screenWidth = scrPlaceFull.realViewportSize[0];
+        if (scrPlaceFull.realViewportSize[1] > 0.0f)
+        {
+            screenHeight = scrPlaceFull.realViewportSize[1];
+        }
+    }
 
     float topHeight = screenHeight * (2.0f / 3.0f);
     float bottomHeight = screenHeight - topHeight;
@@ -1723,6 +1745,66 @@ cmd_function_s CL_IncAnimWeight_f_VAR;
 cmd_function_s CL_DecAnimWeight_f_VAR;
 cmd_function_s XModelDumpInfo_VAR;
 cmd_function_s CL_StopControllerRumbles_VAR;
+
+#ifdef KISAK_SP
+static cmd_function_s CL_VR_Calibrate_f_VAR;
+static void CL_VR_Calibrate_f()
+{
+    VR_StartTPoseCalibration();
+}
+
+static cmd_function_s CL_VR_SkipMission_f_VAR;
+static cmd_function_s CL_VR_SkipMissionAlias_f_VAR;
+static void CL_VR_SkipMission_f()
+{
+    VR_SkipToNextMission();
+}
+
+static cmd_function_s CL_VR_CycleModel_f_VAR;
+static cmd_function_s CL_VR_CycleModelAlias_f_VAR;
+static void CL_VR_CycleModel_f()
+{
+    VR_CyclePlayerFactionOverride();
+}
+
+static cmd_function_s CL_VR_StockToggle_f_VAR;
+static void CL_VR_StockToggle_f()
+{
+    VR_SetVirtualStockEnabled(!VR_IsVirtualStockEnabled());
+}
+
+static cmd_function_s CL_VR_CompassToggle_f_VAR;
+static void CL_VR_CompassToggle_f()
+{
+    VrCompassMode mode = VR_GetCompassMode();
+    int next = (static_cast<int>(mode) + 1) % 4;
+    VR_SetCompassMode(static_cast<VrCompassMode>(next));
+    const dvar_t *dvar = Dvar_FindVar("vr_compassMode");
+    if (dvar)
+    {
+        Dvar_SetInt((dvar_s*)dvar, next);
+    }
+}
+
+static cmd_function_s CL_VR_TurnToggle_f_VAR;
+static void CL_VR_TurnToggle_f()
+{
+    VrTurnMode turn = VR_GetTurnMode();
+    VR_SetTurnMode(turn == VrTurnMode::Snap ? VrTurnMode::Smooth : VrTurnMode::Snap);
+}
+
+static cmd_function_s CL_VR_SeatedToggle_f_VAR;
+static void CL_VR_SeatedToggle_f()
+{
+    VR_ToggleSeatedMode();
+}
+
+static cmd_function_s CL_VR_HoldToGripToggle_f_VAR;
+static void CL_VR_HoldToGripToggle_f()
+{
+    VR_ToggleHoldToGrip();
+}
+#endif
 
 void __cdecl CL_Init(int localClientNum)
 {
@@ -1851,6 +1933,21 @@ void __cdecl CL_Init(int localClientNum)
     //CL_Xenon_RegisterDvars();
     //CL_Xenon_RegisterCommands();
     Cmd_AddCommandInternal("stopControllerRumble", CL_StopControllerRumbles, &CL_StopControllerRumbles_VAR);
+#ifdef KISAK_SP
+    Cmd_AddCommandInternal("vr_calibrate", CL_VR_Calibrate_f, &CL_VR_Calibrate_f_VAR);
+    Cmd_AddCommandInternal("vr_skip_mission", CL_VR_SkipMission_f, &CL_VR_SkipMission_f_VAR);
+    Cmd_AddCommandInternal("vr_skipMission", CL_VR_SkipMission_f, &CL_VR_SkipMissionAlias_f_VAR);
+    Cmd_AddCommandInternal("vr_cycle_model", CL_VR_CycleModel_f, &CL_VR_CycleModel_f_VAR);
+    Cmd_AddCommandInternal("vr_cycleModel", CL_VR_CycleModel_f, &CL_VR_CycleModelAlias_f_VAR);
+    Cmd_AddCommandInternal("vr_stock_toggle", CL_VR_StockToggle_f, &CL_VR_StockToggle_f_VAR);
+    Cmd_AddCommandInternal("vr_compass_toggle", CL_VR_CompassToggle_f, &CL_VR_CompassToggle_f_VAR);
+    Cmd_AddCommandInternal("vr_turn_toggle", CL_VR_TurnToggle_f, &CL_VR_TurnToggle_f_VAR);
+    Cmd_AddCommandInternal("vr_seated_toggle", CL_VR_SeatedToggle_f, &CL_VR_SeatedToggle_f_VAR);
+    Cmd_AddCommandInternal("vr_hold_toggle", CL_VR_HoldToGripToggle_f, &CL_VR_HoldToGripToggle_f_VAR);
+    Dvar_RegisterBool("vr_wristAmmo", true, DVAR_ARCHIVE, "Display live ammunition counter on operator wrist");
+    Dvar_RegisterBool("vr_seatedMode", false, DVAR_ARCHIVE, "Enable seated VR playstyle mode");
+    Dvar_RegisterBool("vr_holdToGrip", true, DVAR_ARCHIVE, "Enable holster tethering (hold-to-grip)");
+#endif
     Com_Printf(14, "----- Initializing Renderer ----\n");
 
     CL_InitRef();

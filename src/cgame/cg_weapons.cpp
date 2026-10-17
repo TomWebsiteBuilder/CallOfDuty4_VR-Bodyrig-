@@ -611,14 +611,16 @@ enum class VrPlayerFaction
 {
     SasUrban,
     SasWoodland,
+    SasNightVision,
     GhillieSniper,
+    OpForDisguise,
     Usmc,
 };
 
 static constexpr int
     kVrBodyRigAssetCapacity = 8;
 static constexpr uint16_t
-    kVrBodyRigSegmentCount = 13u;
+    kVrBodyRigSegmentCount = 14u;
 static constexpr uint16_t
     kVrBodyRigRingSides = 16u;
 static constexpr uint16_t
@@ -626,12 +628,13 @@ static constexpr uint16_t
         kVrBodyRigSegmentCount * kVrBodyRigRingSides * 2u;
 static constexpr uint16_t
     kVrBodyRigTotalTriangles =
-        kVrBodyRigSegmentCount * kVrBodyRigRingSides * 2u;
+        kVrBodyRigSegmentCount * kVrBodyRigRingSides * 2u + 56u;
 
 struct VrBodyRigTorsoAndArmsAsset
 {
     XModel* sourceModel = nullptr;
     XModel bodyRigModel = {};
+    Material* bodyMaterial = nullptr;
     XSurface* bodyRigSurfaces = nullptr;
     GfxPackedVertex* dynamicVertices = nullptr;
     uint16_t* triangleIndices = nullptr;
@@ -650,16 +653,88 @@ struct VrBodyRigTorsoAndArmsAsset
 static VrBodyRigTorsoAndArmsAsset
     s_vrBodyRigAssets[kVrBodyRigAssetCapacity] = {};
 
-static VrPlayerFaction VR_GetMissionPlayerFaction()
+static const char* VR_GetActiveMapName()
 {
     const char* map = cgsArray[0].mapname;
     if (map == nullptr || !*map)
     {
         map = Dvar_GetString("mapname");
     }
-    if (map == nullptr || !*map)
+    return map != nullptr ? map : "";
+}
+
+static bool VR_ShouldRenderMissionBodyRig()
+{
+    const char* map = VR_GetActiveMapName();
+    if (!*map)
+    {
+        return true;
+    }
+
+    // Hide the body rig during non-interactive vehicle/thermal missions
+    // (The Coup sedan sequence and Death From Above AC-130 thermal console).
+    if (strstr(map, "coup") != nullptr ||
+        strstr(map, "ac130") != nullptr)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+static bool VR_ShouldRenderMissionBodyRigHolsters()
+{
+    const char* map = VR_GetActiveMapName();
+    if (!*map)
+    {
+        return true;
+    }
+
+    // Show a stripped/unholstered USMC body rig in Aftermath.
+    if (strstr(map, "aftermath") != nullptr)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+static VrPlayerFaction VR_GetMissionPlayerFaction(const XModel* sourceHandModel = nullptr)
+{
+    const int overrideFaction = VR_GetPlayerFactionOverride();
+    if (overrideFaction >= 0 && overrideFaction <= 5)
+    {
+        return static_cast<VrPlayerFaction>(overrideFaction);
+    }
+
+    const char* map = VR_GetActiveMapName();
+    if (!*map)
     {
         return VrPlayerFaction::SasUrban;
+    }
+
+    // Disguised OpFor sequence in The Sins of the Father (ambush)
+    if (strstr(map, "ambush") != nullptr)
+    {
+        const char* handName =
+            (sourceHandModel != nullptr && sourceHandModel->name != nullptr)
+                ? sourceHandModel->name
+                : "";
+        if (strstr(handName, "op_force") != nullptr ||
+            strstr(handName, "opforce") != nullptr ||
+            (IsFastFileLoad() &&
+             DB_FindXAssetEntry(ASSET_TYPE_XMODEL, "body_sp_opforce_a") != nullptr &&
+             DB_FindXAssetEntry(ASSET_TYPE_XMODEL, "body_complete_sp_sas_woodland_price") == nullptr))
+        {
+            return VrPlayerFaction::OpForDisguise;
+        }
+        return VrPlayerFaction::OpForDisguise;
+    }
+
+    // Night-vision SAS kit in Blackout
+    if (strstr(map, "blackout") != nullptr)
+    {
+        return VrPlayerFaction::SasNightVision;
     }
 
     // Stealth / Sniper missions (All Ghillied Up, One Shot One Kill)
@@ -672,6 +747,7 @@ static VrPlayerFaction VR_GetMissionPlayerFaction()
     // US Marine missions (The Bog, War Pig, Shock and Awe, Charlie Don't Surf, Aftermath)
     if (strstr(map, "bog_a") != nullptr ||
         strstr(map, "bog_b") != nullptr ||
+        strstr(map, "warpig") != nullptr ||
         strstr(map, "airlift") != nullptr ||
         strstr(map, "armada") != nullptr ||
         strstr(map, "aftermath") != nullptr)
@@ -688,7 +764,7 @@ static VrPlayerFaction VR_GetMissionPlayerFaction()
         return VrPlayerFaction::SasUrban;
     }
 
-    // SAS Woodland missions (Safehouse, Heat, Blackout, Hunted, Sins of the Father, Ultimatum, All In, Game Over)
+    // SAS Woodland missions (Safehouse, Heat, Hunted, Ultimatum, All In, No Fighting in the War Room, Game Over)
     return VrPlayerFaction::SasWoodland;
 }
 
@@ -704,13 +780,32 @@ static XModel* VR_ResolveFactionCharacterModel(const VrPlayerFaction faction)
         "playermodel_usmc_ghillie",
     };
 
+    static const char* const kOpForDisguiseCandidates[] = {
+        "body_sp_opforce_a",
+        "body_sp_opforce_b",
+        "body_sp_opforce_c",
+        "body_sp_opforce_d",
+        "viewhands_op_force",
+        "viewhands_sas_woodland",
+    };
+
+    static const char* const kSasNightVisionCandidates[] = {
+        "body_complete_sp_sas_nvg_price",
+        "body_complete_sp_sas_woodland_price",
+        "body_complete_sp_sas_woodland_gaz",
+        "viewhands_sas_woodland",
+    };
+
     static const char* const kUsmcCandidates[] = {
+        "body_sp_usmc_james",
         "body_complete_sp_usmc_mark",
         "body_complete_sp_usmc_vasquez",
         "body_complete_sp_usmc_zach",
         "body_complete_sp_usmc_force_mark",
-        "body_sp_usmc_james",
+        "body_sp_usmc_ryan",
+        "body_sp_usmc_zach",
         "viewhands_player_usmc",
+        "viewmodel_base_viewhands",
         "playermodel_usmc",
     };
 
@@ -720,6 +815,7 @@ static XModel* VR_ResolveFactionCharacterModel(const VrPlayerFaction faction)
         "body_complete_sp_sas_ct_price_maskup",
         "body_complete_sp_sas_ct_neal",
         "body_complete_sp_sas_ct_william",
+        "viewhands_black_kit",
         "viewhands_player_blackkit",
         "playermodel_sas_urban",
     };
@@ -740,6 +836,14 @@ static XModel* VR_ResolveFactionCharacterModel(const VrPlayerFaction faction)
         candidates = kGhillieCandidates;
         candidateCount = sizeof(kGhillieCandidates) / sizeof(kGhillieCandidates[0]);
         break;
+    case VrPlayerFaction::OpForDisguise:
+        candidates = kOpForDisguiseCandidates;
+        candidateCount = sizeof(kOpForDisguiseCandidates) / sizeof(kOpForDisguiseCandidates[0]);
+        break;
+    case VrPlayerFaction::SasNightVision:
+        candidates = kSasNightVisionCandidates;
+        candidateCount = sizeof(kSasNightVisionCandidates) / sizeof(kSasNightVisionCandidates[0]);
+        break;
     case VrPlayerFaction::Usmc:
         candidates = kUsmcCandidates;
         candidateCount = sizeof(kUsmcCandidates) / sizeof(kUsmcCandidates[0]);
@@ -755,9 +859,18 @@ static XModel* VR_ResolveFactionCharacterModel(const VrPlayerFaction faction)
         break;
     }
 
+    const char* map = VR_GetActiveMapName();
+    const bool isAftermath = (map != nullptr && strstr(map, "aftermath") != nullptr);
+
     for (size_t i = 0u; i < candidateCount; ++i)
     {
         const char* name = candidates[i];
+        if (!isAftermath && i == 0u && faction == VrPlayerFaction::Usmc &&
+            !I_stricmp(name, "body_sp_usmc_james"))
+        {
+            // Prefer full kit Marines on combat USMC missions if available, falling back to james.
+            continue;
+        }
         if (IsFastFileLoad())
         {
             if (DB_FindXAssetEntry(ASSET_TYPE_XMODEL, name) != nullptr)
@@ -772,6 +885,20 @@ static XModel* VR_ResolveFactionCharacterModel(const VrPlayerFaction faction)
         else
         {
             XModel* model = R_RegisterModel(name);
+            if (model != nullptr && model->numsurfs > 0 && model->surfs != nullptr)
+            {
+                return model;
+            }
+        }
+    }
+
+    // Second pass if body_sp_usmc_james was skipped in pass 1
+    if (!isAftermath && faction == VrPlayerFaction::Usmc)
+    {
+        const char* fallbackName = "body_sp_usmc_james";
+        if (!IsFastFileLoad() || DB_FindXAssetEntry(ASSET_TYPE_XMODEL, fallbackName) != nullptr)
+        {
+            XModel* model = R_RegisterModel(fallbackName);
             if (model != nullptr && model->numsurfs > 0 && model->surfs != nullptr)
             {
                 return model;
@@ -1513,22 +1640,21 @@ static bool VR_SelectSplitHandTriangle(
             rightHandWeights != nullptr &&
             rightArmWeightSum >= 0.50f)
         {
-            // Keep only the right glove + wrist cuff on the weapon viewmodel so
-            // the dynamic 2-bone IK right arm replaces the rigid stock sleeve.
+            // Keep the right glove plus its full wrist cuff on the weapon viewmodel
+            // so the dynamic 2-bone IK right arm and wrist socket bridge seamlessly.
             return
-                rightHandWeightSum >= 0.60f &&
-                maximumRightHandWeight >= 0.35f;
+                rightHandWeightSum >= 0.32f &&
+                maximumRightHandWeight >= 0.18f;
         }
 
         return true;
     }
 
-    // Keep the glove plus a small wrist-weighted cuff, but reject the sleeve.
-    // The latter carries only the wrist-twist helper's roughly five-percent
-    // corrective weight in the stock model.
+    // Keep the glove plus its wrist-weighted cuff so the left wrist socket
+    // bridges seamlessly into the floating left glove without a gap.
     return
-        leftHandWeightSum >= 0.60f &&
-        maximumLeftHandWeight >= 0.35f;
+        leftHandWeightSum >= 0.32f &&
+        maximumLeftHandWeight >= 0.18f;
 }
 
 static uint16_t* VR_CreateSplitHandIndexList(
@@ -7464,7 +7590,8 @@ static void VR_WriteBodyRigSegmentPrism(
     const float startRadiusForward,
     const float startRadiusRight,
     const float endRadiusForward,
-    const float endRadiusRight)
+    const float endRadiusRight,
+    const bool sealEndCapBlack = false)
 {
     float axisDir[3] = {
         endPos[0] - startPos[0],
@@ -7478,8 +7605,20 @@ static void VR_WriteBodyRigSegmentPrism(
         axisDir[2] = -1.0f;
     }
 
-    float refForward[3] = {1.0f, 0.0f, 0.0f};
-    if (std::fabs(axisDir[0]) > 0.88f)
+    const float absAxisX = std::fabs(axisDir[0]);
+    float blendZ = 0.0f;
+    if (absAxisX > 0.65f)
+    {
+        const float rawT = (absAxisX - 0.65f) / 0.31f;
+        const float clampedT = rawT < 0.0f ? 0.0f : (rawT > 1.0f ? 1.0f : rawT);
+        blendZ = clampedT * clampedT * (3.0f - 2.0f * clampedT);
+    }
+    float refForward[3] = {
+        1.0f - blendZ,
+        0.0f,
+        (axisDir[0] * axisDir[2] >= 0.0f) ? -blendZ : blendZ,
+    };
+    if (!VR_NormalizeModelHandDirection(refForward))
     {
         refForward[0] = 0.0f;
         refForward[1] = 0.0f;
@@ -7600,6 +7739,10 @@ static void VR_WriteBodyRigSegmentPrism(
         vEnd.normal = packedNormal;
         vEnd.tangent = packedTangent;
         vEnd.texCoord = Vec2PackTexCoords(uvEnd);
+        if (sealEndCapBlack)
+        {
+            vEnd.color.packed = 0xFF000000u;
+        }
     }
 }
 
@@ -7612,7 +7755,6 @@ VR_GetOrCreateBodyRigTorsoAndArmsAsset(
         sourceHandModel->numBones == 0u ||
         sourceHandModel->numsurfs == 0u ||
         sourceHandModel->surfs == nullptr ||
-        sourceHandModel->surfs[0].verts0 == nullptr ||
         sourceHandModel->baseMat == nullptr)
     {
         return nullptr;
@@ -7624,6 +7766,79 @@ VR_GetOrCreateBodyRigTorsoAndArmsAsset(
         {
             return asset.ready ? &asset : nullptr;
         }
+    }
+
+    int bestSurfIdx = -1;
+    int bestSurfScore = -10000;
+    const int lod0SurfLimit =
+        (sourceHandModel->numLods > 0 &&
+         sourceHandModel->lodInfo[0].numsurfs > 0 &&
+         sourceHandModel->lodInfo[0].surfIndex +
+                 sourceHandModel->lodInfo[0].numsurfs <=
+             sourceHandModel->numsurfs)
+            ? (sourceHandModel->lodInfo[0].surfIndex +
+               sourceHandModel->lodInfo[0].numsurfs)
+            : sourceHandModel->numsurfs;
+
+    for (int i = 0; i < sourceHandModel->numsurfs; ++i)
+    {
+        if (sourceHandModel->surfs[i].verts0 == nullptr ||
+            sourceHandModel->surfs[i].vertCount == 0u)
+        {
+            continue;
+        }
+
+        int score = (i < lod0SurfLimit) ? 20 : 0;
+        if (sourceHandModel->surfs[i].deformed)
+        {
+            score += 15;
+        }
+
+        Material* mat =
+            sourceHandModel->materialHandles != nullptr
+                ? sourceHandModel->materialHandles[i]
+                : nullptr;
+        const char* matName =
+            (mat != nullptr && mat->info.name != nullptr)
+                ? mat->info.name
+                : "";
+
+        if (I_stristr(matName, "body") != nullptr ||
+            I_stristr(matName, "torso") != nullptr ||
+            I_stristr(matName, "chest") != nullptr ||
+            I_stristr(matName, "uniform") != nullptr ||
+            I_stristr(matName, "clothes") != nullptr ||
+            I_stristr(matName, "upper") != nullptr ||
+            I_stristr(matName, "ghillie") != nullptr ||
+            I_stristr(matName, "sleeve") != nullptr ||
+            I_stristr(matName, "hand") != nullptr)
+        {
+            score += 50;
+        }
+        if (I_stristr(matName, "head") != nullptr ||
+            I_stristr(matName, "face") != nullptr ||
+            I_stristr(matName, "eye") != nullptr ||
+            I_stristr(matName, "teeth") != nullptr ||
+            I_stristr(matName, "mouth") != nullptr ||
+            I_stristr(matName, "helmet") != nullptr ||
+            I_stristr(matName, "goggle") != nullptr ||
+            I_stristr(matName, "glass") != nullptr ||
+            I_stristr(matName, "alpha") != nullptr ||
+            I_stristr(matName, "decal") != nullptr)
+        {
+            score -= 100;
+        }
+
+        if (score > bestSurfScore)
+        {
+            bestSurfScore = score;
+            bestSurfIdx = i;
+        }
+    }
+
+    if (bestSurfIdx < 0)
+    {
+        return nullptr;
     }
 
     for (VrBodyRigTorsoAndArmsAsset& asset : s_vrBodyRigAssets)
@@ -7639,7 +7854,7 @@ VR_GetOrCreateBodyRigTorsoAndArmsAsset(
         XSurface* bodySurfaces =
             reinterpret_cast<XSurface*>(
                 Hunk_Alloc(
-                    sourceHandModel->numsurfs * sizeof(XSurface),
+                    sizeof(XSurface),
                     "VR body rig surfaces",
                     21));
         GfxPackedVertex* dynamicVertices =
@@ -7678,9 +7893,9 @@ VR_GetOrCreateBodyRigTorsoAndArmsAsset(
         }
 
         std::memcpy(
-            bodySurfaces,
-            sourceHandModel->surfs,
-            sourceHandModel->numsurfs * sizeof(XSurface));
+            &bodySurfaces[0],
+            &sourceHandModel->surfs[bestSurfIdx],
+            sizeof(XSurface));
         std::memset(
             rigidRootBlends,
             0,
@@ -7700,7 +7915,8 @@ VR_GetOrCreateBodyRigTorsoAndArmsAsset(
         rootBaseMat[0].transWeight = 2.0f;
 
         asset.templateVertex =
-            sourceHandModel->surfs[0].verts0[0];
+            sourceHandModel->surfs[bestSurfIdx].verts0[0];
+        asset.templateVertex.color.packed = 0xFFFFFFFFu;
         asset.templateVertex.binormalSign = 1.0f;
 
         uint32_t writeIdx = 0u;
@@ -7727,6 +7943,33 @@ VR_GetOrCreateBodyRigTorsoAndArmsAsset(
             }
         }
 
+        // Solid black end-cap disc circles sealing left and right sleeve cuffs
+        // Left wrist cuff disc (segment 9)
+        const uint16_t leftCuffBase = 9u * kVrBodyRigRingSides * 2u + kVrBodyRigRingSides;
+        for (uint16_t i = 1u; i < kVrBodyRigRingSides - 1u; ++i)
+        {
+            triangleIndices[writeIdx++] = leftCuffBase;
+            triangleIndices[writeIdx++] = leftCuffBase + i;
+            triangleIndices[writeIdx++] = leftCuffBase + i + 1u;
+
+            triangleIndices[writeIdx++] = leftCuffBase;
+            triangleIndices[writeIdx++] = leftCuffBase + i + 1u;
+            triangleIndices[writeIdx++] = leftCuffBase + i;
+        }
+
+        // Right wrist cuff disc (segment 13)
+        const uint16_t rightCuffBase = 13u * kVrBodyRigRingSides * 2u + kVrBodyRigRingSides;
+        for (uint16_t i = 1u; i < kVrBodyRigRingSides - 1u; ++i)
+        {
+            triangleIndices[writeIdx++] = rightCuffBase;
+            triangleIndices[writeIdx++] = rightCuffBase + i;
+            triangleIndices[writeIdx++] = rightCuffBase + i + 1u;
+
+            triangleIndices[writeIdx++] = rightCuffBase;
+            triangleIndices[writeIdx++] = rightCuffBase + i + 1u;
+            triangleIndices[writeIdx++] = rightCuffBase + i;
+        }
+
         XSurface& primarySurface = bodySurfaces[0];
         primarySurface.zoneHandle = kVrRuntimeSplitSurfaceZoneHandle;
         primarySurface.baseTriIndex = 0u;
@@ -7749,33 +7992,29 @@ VR_GetOrCreateBodyRigTorsoAndArmsAsset(
         primarySurface.partBits[2] = 0;
         primarySurface.partBits[3] = 0;
 
-        for (int surfIdx = 1; surfIdx < sourceHandModel->numsurfs; ++surfIdx)
-        {
-            uint16_t* degenerateIndices =
-                VR_CreateDegenerateSurfaceIndexList(
-                    sourceHandModel->surfs[surfIdx]);
-            if (degenerateIndices != nullptr)
-            {
-                bodySurfaces[surfIdx].zoneHandle =
-                    kVrRuntimeSplitSurfaceZoneHandle;
-                bodySurfaces[surfIdx].baseTriIndex = 0u;
-                bodySurfaces[surfIdx].triIndices = degenerateIndices;
-                bodySurfaces[surfIdx].triCount = 2u;
-            }
-        }
+        asset.bodyMaterial =
+            (sourceHandModel->materialHandles != nullptr &&
+             sourceHandModel->materialHandles[bestSurfIdx] != nullptr)
+                ? sourceHandModel->materialHandles[bestSurfIdx]
+                : rgp.defaultMaterial;
 
         asset.bodyRigModel = *sourceHandModel;
         asset.bodyRigModel.name = sourceHandModel->name;
+        asset.bodyRigModel.numsurfs = 1u;
+        asset.bodyRigModel.numLods = 1;
         asset.bodyRigModel.surfs = bodySurfaces;
+        asset.bodyRigModel.materialHandles = &asset.bodyMaterial;
         asset.bodyRigModel.baseMat = rootBaseMat;
-        for (int lodIndex = 0; lodIndex < 4; ++lodIndex)
-        {
-            asset.bodyRigModel.lodInfo[lodIndex].partBits[0] =
-                static_cast<int>(0x80000000u);
-            asset.bodyRigModel.lodInfo[lodIndex].partBits[1] = 0;
-            asset.bodyRigModel.lodInfo[lodIndex].partBits[2] = 0;
-            asset.bodyRigModel.lodInfo[lodIndex].partBits[3] = 0;
-        }
+        std::memset(
+            asset.bodyRigModel.lodInfo,
+            0,
+            sizeof(asset.bodyRigModel.lodInfo));
+        asset.bodyRigModel.lodInfo[0].dist = 1000000.0f;
+        asset.bodyRigModel.lodInfo[0].numsurfs = 1u;
+        asset.bodyRigModel.lodInfo[0].surfIndex = 0u;
+        asset.bodyRigModel.lodInfo[0].partBits[0] =
+            static_cast<int>(0x80000000u);
+
         for (int c = 0; c < 3; ++c)
         {
             asset.bodyRigModel.mins[c] = -96.0f;
@@ -7916,9 +8155,9 @@ static void VR_AddPhysicalBodyRigToScene(
     const float cameraAxis[3][3],
     const float lightingOrigin[3])
 {
-    if (weapDef == nullptr ||
-        ps == nullptr ||
-        lightingOrigin == nullptr)
+    if (ps == nullptr ||
+        lightingOrigin == nullptr ||
+        !VR_ShouldRenderMissionBodyRig())
     {
         return;
     }
@@ -7970,6 +8209,13 @@ static void VR_AddPhysicalBodyRigToScene(
         bodyState.rightWrist[1],
         bodyState.rightWrist[2],
     };
+    float rightWristAxisWorld[3][3] = {
+        {bodyState.bodyAxis[0][0], bodyState.bodyAxis[0][1], bodyState.bodyAxis[0][2]},
+        {bodyState.bodyAxis[1][0], bodyState.bodyAxis[1][1], bodyState.bodyAxis[1][2]},
+        {bodyState.bodyAxis[2][0], bodyState.bodyAxis[2][1], bodyState.bodyAxis[2][2]},
+    };
+    bool rightHandViewmodelSuppressed = false;
+
     if (bodyState.knifeDrawn && bodyState.knifeHandIndex == 1)
     {
         for (int i = 0; i < 3; ++i)
@@ -7978,6 +8224,11 @@ static void VR_AddPhysicalBodyRigToScene(
                 bodyState.heldKnifeOrigin[i] -
                 bodyState.heldKnifeAxis[0][i] * 2.2f;
         }
+        std::memcpy(
+            rightWristAxisWorld,
+            bodyState.heldKnifeAxis,
+            sizeof(rightWristAxisWorld));
+        rightHandViewmodelSuppressed = s_vrHideViewmodelForWeaponHandKnife;
     }
     else if (manualGrenadeHeld && VR_IsManualGrenadeHeldInWeaponHand())
     {
@@ -7987,6 +8238,20 @@ static void VR_AddPhysicalBodyRigToScene(
                 heldGrenadeOrigin[i] -
                 heldGrenadeAxis[0][i] * 2.0f;
         }
+        std::memcpy(
+            rightWristAxisWorld,
+            heldGrenadeAxis,
+            sizeof(rightWristAxisWorld));
+        rightHandViewmodelSuppressed = true;
+    }
+    else if (VR_IsPhysicalWeaponHolstered())
+    {
+        rightHandViewmodelSuppressed = true;
+        VR_GetRightControllerGripWorld(
+            cameraOrigin,
+            cameraAxis,
+            rightWristWorld,
+            rightWristAxisWorld);
     }
     else if (weaponViewModel != nullptr && weaponPose != nullptr)
     {
@@ -8006,6 +8271,52 @@ static void VR_AddPhysicalBodyRigToScene(
                 rightWristWorld,
                 tagOrigin,
                 sizeof(rightWristWorld));
+            std::memcpy(
+                rightWristAxisWorld,
+                tagAxis,
+                sizeof(rightWristAxisWorld));
+        }
+    }
+
+    // When the weapon viewmodel is suppressed because the right hand is holding
+    // a physical knife or grenade, submit the standalone right glove at the
+    // right wrist so the right hand stays visible and connected to the arm.
+    if (rightHandViewmodelSuppressed && VR_TrackedHandsEnabled())
+    {
+        XModel* rightGloveSource =
+            s_vrAirSupportStableRightHandDonorModel != nullptr
+                ? s_vrAirSupportStableRightHandDonorModel
+                : sourceHandModel;
+        if (rightGloveSource != nullptr)
+        {
+            VrAirSupportRightHandAsset* rightGloveAsset =
+                VR_GetAirSupportRightHandAsset(rightGloveSource);
+            if (rightGloveAsset != nullptr &&
+                VR_CreateAirSupportRightHandObject(rightGloveAsset))
+            {
+                float rawRightQuat[4] = {};
+                float normRightQuat[4] = {};
+                AxisToQuat(rightWristAxisWorld, rawRightQuat);
+                if (VR_NormalizeHandQuaternion(rawRightQuat, normRightQuat) &&
+                    VR_SetRigidHandRootPose(
+                        &rightGloveAsset->object,
+                        &rightGloveAsset->pose,
+                        rightWristWorld,
+                        normRightQuat))
+                {
+                    float mutableLightingOrigin[3] = {
+                        lightingOrigin[0],
+                        lightingOrigin[1],
+                        lightingOrigin[2],
+                    };
+                    R_AddDObjToSceneUntracked(
+                        &rightGloveAsset->object,
+                        &rightGloveAsset->pose,
+                        3u,
+                        mutableLightingOrigin,
+                        0.0f);
+                }
+            }
         }
     }
 
@@ -8050,7 +8361,7 @@ static void VR_AddPhysicalBodyRigToScene(
         rightElbowWorld);
 
     // 1. Render the 3D Tactical Torso Vest + 2-Bone IK Left & Right Arms.
-    const VrPlayerFaction currentFaction = VR_GetMissionPlayerFaction();
+    const VrPlayerFaction currentFaction = VR_GetMissionPlayerFaction(sourceHandModel);
     XModel* factionModel = VR_ResolveFactionCharacterModel(currentFaction);
 
     XModel* donorModel = factionModel != nullptr
@@ -8137,9 +8448,27 @@ static void VR_AddPhysicalBodyRigToScene(
             leftWristLocal[2] * 0.15f + leftElbowLocal[2] * 0.85f,
         };
         const float leftCuffStart[3] = {
-            leftElbowLocal[0] * 0.14f + leftWristLocal[0] * 0.86f,
-            leftElbowLocal[1] * 0.14f + leftWristLocal[1] * 0.86f,
-            leftElbowLocal[2] * 0.14f + leftWristLocal[2] * 0.86f,
+            leftElbowLocal[0] * 0.16f + leftWristLocal[0] * 0.84f,
+            leftElbowLocal[1] * 0.16f + leftWristLocal[1] * 0.84f,
+            leftElbowLocal[2] * 0.16f + leftWristLocal[2] * 0.84f,
+        };
+        float leftForearmDir[3] = {
+            leftWristLocal[0] - leftElbowLocal[0],
+            leftWristLocal[1] - leftElbowLocal[1],
+            leftWristLocal[2] - leftElbowLocal[2],
+        };
+        if (!VR_NormalizeModelHandDirection(leftForearmDir))
+        {
+            leftForearmDir[0] = 1.0f;
+            leftForearmDir[1] = 0.0f;
+            leftForearmDir[2] = 0.0f;
+        }
+        // Extend the wrist socket slightly into the glove palm base so the
+        // sleeve-to-glove connection stays airtight across all wrist rotations.
+        const float leftCuffEnd[3] = {
+            leftWristLocal[0] + leftForearmDir[0] * 1.40f,
+            leftWristLocal[1] + leftForearmDir[1] * 1.40f,
+            leftWristLocal[2] + leftForearmDir[2] * 1.40f,
         };
 
         const float rightElbowPadStart[3] = {
@@ -8152,12 +8481,34 @@ static void VR_AddPhysicalBodyRigToScene(
             rightWristLocal[1] * 0.15f + rightElbowLocal[1] * 0.85f,
             rightWristLocal[2] * 0.15f + rightElbowLocal[2] * 0.85f,
         };
+        const float rightCuffStart[3] = {
+            rightElbowLocal[0] * 0.16f + rightWristLocal[0] * 0.84f,
+            rightElbowLocal[1] * 0.16f + rightWristLocal[1] * 0.84f,
+            rightElbowLocal[2] * 0.16f + rightWristLocal[2] * 0.84f,
+        };
+        float rightForearmDir[3] = {
+            rightWristLocal[0] - rightElbowLocal[0],
+            rightWristLocal[1] - rightElbowLocal[1],
+            rightWristLocal[2] - rightElbowLocal[2],
+        };
+        if (!VR_NormalizeModelHandDirection(rightForearmDir))
+        {
+            rightForearmDir[0] = 1.0f;
+            rightForearmDir[1] = 0.0f;
+            rightForearmDir[2] = 0.0f;
+        }
+        const float rightCuffEnd[3] = {
+            rightWristLocal[0] + rightForearmDir[0] * 1.40f,
+            rightWristLocal[1] + rightForearmDir[1] * 1.40f,
+            rightWristLocal[2] + rightForearmDir[2] * 1.40f,
+        };
 
         // Faction-specific geometry dimensions:
         // Ghillie Sniper: thick layered burlap drape, jute foliage strands, camouflage shrouds.
         // USMC: Interceptor OTV plate carrier, SAPI ceramic plates, shoulder brassards.
         // SAS Urban: Black kit assault suit, low-profile tactical vest.
-        // SAS Woodland: Field assault uniform, load-bearing webbing and chest pouches.
+        // SAS Woodland / NightVision: Field assault uniform, load-bearing webbing and chest pouches.
+        // OpFor Disguise: Eastern bloc field vest and olive/khaki combat sleeves.
         float chestTopRadiusFwd = 3.5f;
         float chestTopRadiusRight = 6.8f;
         float chestMidRadiusFwd = 3.6f;
@@ -8189,8 +8540,8 @@ static void VR_AddPhysicalBodyRigToScene(
         float forearmStartRadius = 2.08f;
         float forearmEndRadius = 1.48f;
         float cuffStartRadius = 1.62f;
-        float cuffEndRadius = 1.58f;
-        float rightForearmEndRadius = 1.32f;
+        float cuffEndRadius = 1.28f;
+        float rightForearmEndRadius = 1.48f;
 
         const char* factionName = "SAS Urban";
 
@@ -8230,8 +8581,8 @@ static void VR_AddPhysicalBodyRigToScene(
             forearmStartRadius = 2.7f;
             forearmEndRadius = 2.1f;
             cuffStartRadius = 2.2f;
-            cuffEndRadius = 2.0f;
-            rightForearmEndRadius = 1.9f;
+            cuffEndRadius = 1.55f;
+            rightForearmEndRadius = 2.1f;
             break;
 
         case VrPlayerFaction::Usmc:
@@ -8267,12 +8618,50 @@ static void VR_AddPhysicalBodyRigToScene(
             forearmStartRadius = 2.22f;
             forearmEndRadius = 1.58f;
             cuffStartRadius = 1.72f;
-            cuffEndRadius = 1.65f;
-            rightForearmEndRadius = 1.42f;
+            cuffEndRadius = 1.34f;
+            rightForearmEndRadius = 1.58f;
             break;
 
+        case VrPlayerFaction::OpForDisguise:
+            factionName = "OpFor Disguise";
+            chestTopRadiusFwd = 3.65f;
+            chestTopRadiusRight = 6.9f;
+            chestMidRadiusFwd = 3.75f;
+            chestMidRadiusRight = 6.5f;
+            waistRadiusFwd = 3.45f;
+            waistRadiusRight = 6.3f;
+            waistBottomRadiusFwd = 3.25f;
+            waistBottomRadiusRight = 5.9f;
+            hipRadiusFwd = 3.55f;
+            hipRadiusRight = 6.4f;
+            hipBottomRadiusFwd = 3.65f;
+            hipBottomRadiusRight = 6.5f;
+
+            shoulderStartFwd = 2.25f;
+            shoulderStartRight = 2.45f;
+            shoulderEndFwd = 2.55f;
+            shoulderEndRight = 2.7f;
+
+            molleTopRadiusFwd = 1.2f;
+            molleTopRadiusRight = 4.7f;
+            molleBotRadiusFwd = 1.3f;
+            molleBotRadiusRight = 4.5f;
+
+            armUpperStartRadius = 2.5f;
+            armUpperEndRadius = 2.1f;
+            elbowPadRadius = 2.24f;
+            forearmStartRadius = 2.1f;
+            forearmEndRadius = 1.5f;
+            cuffStartRadius = 1.64f;
+            cuffEndRadius = 1.3f;
+            rightForearmEndRadius = 1.5f;
+            break;
+
+        case VrPlayerFaction::SasNightVision:
         case VrPlayerFaction::SasWoodland:
-            factionName = "SAS Woodland";
+            factionName = (currentFaction == VrPlayerFaction::SasNightVision)
+                ? "SAS Night Vision"
+                : "SAS Woodland";
             chestTopRadiusFwd = 3.7f;
             chestTopRadiusRight = 7.0f;
             chestMidRadiusFwd = 3.8f;
@@ -8302,8 +8691,8 @@ static void VR_AddPhysicalBodyRigToScene(
             forearmStartRadius = 2.12f;
             forearmEndRadius = 1.52f;
             cuffStartRadius = 1.66f;
-            cuffEndRadius = 1.62f;
-            rightForearmEndRadius = 1.36f;
+            cuffEndRadius = 1.32f;
+            rightForearmEndRadius = 1.52f;
             break;
 
         case VrPlayerFaction::SasUrban:
@@ -8369,7 +8758,7 @@ static void VR_AddPhysicalBodyRigToScene(
             molleBotRadiusFwd,
             molleBotRadiusRight);
 
-        // Left 2-bone IK arm (upper sleeve, elbow pad, forearm sleeve, wrist cuff)
+        // Left 2-bone IK arm (upper sleeve, elbow pad, forearm sleeve, wrist cuff socket)
         VR_WriteBodyRigSegmentPrism(
             &rigAsset->dynamicVertices[6u * kSegVerts],
             rigAsset->templateVertex,
@@ -8401,13 +8790,14 @@ static void VR_AddPhysicalBodyRigToScene(
             &rigAsset->dynamicVertices[9u * kSegVerts],
             rigAsset->templateVertex,
             leftCuffStart,
-            leftWristLocal,
+            leftCuffEnd,
             cuffStartRadius,
             cuffStartRadius,
             cuffEndRadius,
-            cuffEndRadius);
+            cuffEndRadius,
+            true);
 
-        // Right 2-bone IK arm (upper sleeve, elbow pad, forearm sleeve)
+        // Right 2-bone IK arm (upper sleeve, elbow pad, forearm sleeve, wrist cuff socket)
         VR_WriteBodyRigSegmentPrism(
             &rigAsset->dynamicVertices[10u * kSegVerts],
             rigAsset->templateVertex,
@@ -8426,20 +8816,25 @@ static void VR_AddPhysicalBodyRigToScene(
             elbowPadRadius,
             elbowPadRadius,
             elbowPadRadius);
-        const float rightForearmCuffTerminus[3] = {
-            rightElbowLocal[0] * 0.08f + rightWristLocal[0] * 0.92f,
-            rightElbowLocal[1] * 0.08f + rightWristLocal[1] * 0.92f,
-            rightElbowLocal[2] * 0.08f + rightWristLocal[2] * 0.92f,
-        };
         VR_WriteBodyRigSegmentPrism(
             &rigAsset->dynamicVertices[12u * kSegVerts],
             rigAsset->templateVertex,
             rightElbowLocal,
-            rightForearmCuffTerminus,
+            rightWristLocal,
             forearmStartRadius,
             forearmStartRadius,
             rightForearmEndRadius,
             rightForearmEndRadius);
+        VR_WriteBodyRigSegmentPrism(
+            &rigAsset->dynamicVertices[13u * kSegVerts],
+            rigAsset->templateVertex,
+            rightCuffStart,
+            rightCuffEnd,
+            cuffStartRadius,
+            cuffStartRadius,
+            cuffEndRadius,
+            cuffEndRadius,
+            true);
 
         float bodyQuat[4] = {};
         float normBodyQuat[4] = {};
@@ -8467,7 +8862,7 @@ static void VR_AddPhysicalBodyRigToScene(
             {
                 Com_Printf(
                     0,
-                    "[VR][BODYRIG] Submitted faction-accurate 3D %s body rig (%s) with dual 2-bone IK arms (%u vertices, %u triangles).\n",
+                    "[VR][BODYRIG] Submitted procedural %s body rig (material donor %s) with dual 2-bone IK arms (%u vertices, %u triangles).\n",
                     factionName,
                     donorModel->name != nullptr ? donorModel->name : "default",
                     kVrBodyRigTotalVertices,
@@ -8475,6 +8870,11 @@ static void VR_AddPhysicalBodyRigToScene(
                 rigAsset->submissionLogWritten = true;
             }
         }
+    }
+
+    if (!VR_ShouldRenderMissionBodyRigHolsters())
+    {
+        return;
     }
 
     // 2. Render Holstered Secondary (Right Hip) and Stowed Primary (Chest Sling).
@@ -8487,7 +8887,8 @@ static void VR_AddPhysicalBodyRigToScene(
          ++candidateIndex)
     {
         if (candidateIndex == weaponNum &&
-            !(bodyState.knifeDrawn && bodyState.knifeHandIndex == 1))
+            !(bodyState.knifeDrawn && bodyState.knifeHandIndex == 1) &&
+            !VR_IsPhysicalWeaponHolstered())
         {
             continue;
         }
@@ -8548,7 +8949,7 @@ static void VR_AddPhysicalBodyRigToScene(
 
     // 3. Render Physical Combat Knife (in active 6DoF hand when drawn, or in
     // the chest sheath when stowed).
-    if (weapDef->knifeModel != nullptr)
+    if (weapDef != nullptr && weapDef->knifeModel != nullptr)
     {
         VR_SubmitBodyHolsterPropToScene(
             &s_vrHolsteredKnifeObject,
@@ -8563,8 +8964,9 @@ static void VR_AddPhysicalBodyRigToScene(
     }
 
     // 4. Render Spare Magazine in the Hip Magazine Pouch.
-    const int ammoIndex = BG_AmmoForWeapon(weaponNum);
-    if (weapDef->worldClipModel != nullptr &&
+    const int ammoIndex = weaponNum > 0u ? BG_AmmoForWeapon(weaponNum) : -1;
+    if (weapDef != nullptr &&
+        weapDef->worldClipModel != nullptr &&
         ammoIndex >= 0 &&
         ps->ammo[ammoIndex] > 0)
     {
@@ -8578,7 +8980,7 @@ static void VR_AddPhysicalBodyRigToScene(
 
     // 5. Render Frag Grenade on the Belt Pouch (unless currently held in hand).
     const int equippedFrag =
-        BG_GetFirstEquippedOffhand(ps, OFFHAND_CLASS_FRAG_GRENADE);
+        BG_GetFirstAvailableOffhand(ps, OFFHAND_CLASS_FRAG_GRENADE);
     const bool hideFragOnBelt =
         manualGrenadeHeld &&
         (heldGrenadeWeaponIndex == equippedFrag ||
@@ -8605,17 +9007,9 @@ static void VR_AddPhysicalBodyRigToScene(
     }
 
     // 6. Render Flashbang / Tactical Smoke on the Tactical Chest Vest Anchor (unless currently held in hand).
-    int equippedTactical = BG_GetFirstEquippedOffhand(
+    const int equippedTactical = BG_GetFirstAvailableOffhand(
         ps,
         ps->offhandSecondary ? OFFHAND_CLASS_FLASH_GRENADE : OFFHAND_CLASS_SMOKE_GRENADE);
-    if (equippedTactical <= 0)
-    {
-        equippedTactical = BG_GetFirstEquippedOffhand(ps, OFFHAND_CLASS_FLASH_GRENADE);
-    }
-    if (equippedTactical <= 0)
-    {
-        equippedTactical = BG_GetFirstEquippedOffhand(ps, OFFHAND_CLASS_SMOKE_GRENADE);
-    }
 
     const bool hideTacticalOnChest =
         manualGrenadeHeld &&
@@ -9709,14 +10103,14 @@ void __cdecl CG_AddPlayerWeapon(
                 const bool detachableMagazineClass =
                     weapDef->weapClass == WEAPCLASS_RIFLE ||
                     weapDef->weapClass == WEAPCLASS_SMG ||
-                    weapDef->weapClass == WEAPCLASS_PISTOL;
+                    weapDef->weapClass == WEAPCLASS_PISTOL ||
+                    weapDef->weapClass == WEAPCLASS_MG;
 
                 const bool detachableMagazineWeapon =
                     weapDef->worldClipModel != nullptr &&
                     weapDef->weapType == WEAPTYPE_BULLET &&
                     detachableMagazineClass &&
-                    !weapDef->bSegmentedReload &&
-                    !weapDef->bBoltAction;
+                    !weapDef->bSegmentedReload;
 
                 const uint32_t magazineTagCandidates[] = {
                     scr_const.tag_clip,
@@ -9842,10 +10236,14 @@ void __cdecl CG_AddPlayerWeapon(
 
                 const bool canManualReload =
                     foundMagazineWell &&
-                    ps->weaponstate == WEAPON_READY &&
+                    (ps->weaponstate == WEAPON_READY ||
+                     ps->weaponstate == WEAPON_FIRING ||
+                     ps->weaponstate == WEAPON_RECHAMBERING) &&
                     ps->ammoclip[clipIndex] <
                         weapDef->iClipSize &&
                     ps->ammo[ammoIndex] > 0;
+
+                const bool emptyChamber = (ps->ammoclip[clipIndex] == 0);
 
                 VR_UpdateManualMagazineReload(
                     static_cast<int>(weaponNum),
@@ -9855,7 +10253,8 @@ void __cdecl CG_AddPlayerWeapon(
                     magazineWellOrigin,
                     magazineWellAxis,
                     cgameGlob->refdef.vieworg,
-                    cgameGlob->refdef.viewaxis);
+                    cgameGlob->refdef.viewaxis,
+                    emptyChamber);
 
                 bool hideLoadedMagazine = false;
                 bool drawEjectedMagazine = false;
@@ -10059,6 +10458,7 @@ void __cdecl CG_AddPlayerWeapon(
                 && !(VR_IsPhysicalKnifeHeld() &&
                      s_vrHideViewmodelForWeaponHandKnife)
                 && !VR_IsManualGrenadeHeldInWeaponHand()
+                && !VR_IsPhysicalWeaponHolstered()
 #endif
                 )
             {
@@ -10129,8 +10529,9 @@ void __cdecl
 CG_AddDeferredPhysicalSniperViewWeaponToScene(
     const int32_t localClientNum)
 {
-    if (!s_vrPhysicalScopeViewWeaponDeferred)
+    if (!s_vrPhysicalScopeViewWeaponDeferred || VR_IsPhysicalWeaponHolstered())
     {
+        s_vrPhysicalScopeViewWeaponDeferred = false;
         return;
     }
 
@@ -11248,6 +11649,26 @@ void __cdecl CG_AddViewWeapon(int32_t localClientNum)
                 cgameGlob->gunXOfs = 0.0f;
                 cgameGlob->gunYOfs = 0.0f;
                 cgameGlob->gunZOfs = 0.0f;
+#ifdef KISAK_SP
+                if (drawgun)
+                {
+                    float unarmedLightingOrigin[3] = {
+                        ps->origin[0],
+                        ps->origin[1],
+                        ps->origin[2] + ps->viewHeightCurrent,
+                    };
+                    VR_AddPhysicalBodyRigToScene(
+                        0u,
+                        nullptr,
+                        nullptr,
+                        nullptr,
+                        nullptr,
+                        ps,
+                        cgameGlob->refdef.vieworg,
+                        cgameGlob->refdef.viewaxis,
+                        unarmedLightingOrigin);
+                }
+#endif
             }
             else
             {

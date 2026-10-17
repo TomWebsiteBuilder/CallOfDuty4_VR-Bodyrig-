@@ -21,6 +21,10 @@ void __cdecl R_DrawXModelRigidModelSurf(GfxCmdBufContext context, XSurface *xsur
     GfxDrawPrimArgs args; // [esp+2Ch] [ebp-Ch] BYREF
 
     iassert(xsurf);
+    if (xsurf->zoneHandle == 0xFFu)
+    {
+        return;
+    }
     args.baseIndex = 0; // LWSS: backport fix from blops
     args.vertexCount = xsurf->vertCount;
     args.triCount = xsurf->triCount;

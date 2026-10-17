@@ -19,8 +19,11 @@ void __cdecl UI_MouseEvent(int localClientNum, int x, int y);
 #include "vr/vr_d3d9_capture.h"
 #include "vr/vr_d3d9ex_interop_probe.h"
 #include "gfx_d3d/r_init.h"
+#include "gfx_d3d/r_cinematic.h"
 
 #include "qcommon/qcommon.h"
+#include "qcommon/cmd.h"
+#include "universal/q_shared.h"
 #include "win32/win_crash_diagnostics.h"
 
 #include <Windows.h>
@@ -194,6 +197,14 @@ VrInputTermLatchState g_vrDirectionalTermLatched = {};
 std::array<bool, VrInput::kActionCount>
     g_vrInputActionPreviousHeld = {};
 
+static inline float VR_Distance3(const float a[3], const float b[3])
+{
+    const float dx = a[0] - b[0];
+    const float dy = a[1] - b[1];
+    const float dz = a[2] - b[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
 bool g_vrMissionShortcutArmed = true;
 
 // KISAK_SP_VR_NIGHT_VISION_VISOR_GESTURE_V80
@@ -289,6 +300,7 @@ bool g_vrLeftControllerForegripPoseValid = false;
 bool g_vrLeftControllerForegripPressed = false;
 bool g_vrLeftControllerSqueezePressedRaw = false;
 bool g_vrRightControllerSqueezePressedRaw = false;
+bool g_vrRightControllerSqueezeAvailable = false;
 bool g_vrLeftControllerObjectGripAvailable = false;
 bool g_vrSupportGripBindingWasHeld = false;
 bool g_vrSupportGripToggleLatched = false;
@@ -358,6 +370,11 @@ bool g_vrTwoHandWeaponAnchorCaptureRequested = false;
 int g_vrTwoHandWeaponAnchorWeaponIndex = 0;
 float g_vrTwoHandWeaponAnchorTargetAxis[3][3] = {};
 float g_vrTwoHandWeaponAnchorControllerAxis[3][3] = {};
+float g_vrTwoHandWeaponAnchorLeftPosition[3] = {};
+float g_vrTwoHandWeaponAnchorRightPosition[3] = {};
+float g_vrTwoHandWeaponAnchorLeftAxis[3][3] = {};
+float g_vrEffectiveWeaponGripPositionCameraLocal[3] = {};
+bool g_vrEffectiveWeaponGripPositionValid = false;
 bool g_vrTwoHandWeaponLastActiveFrameValid = false;
 int g_vrTwoHandWeaponLastActiveWeaponIndex = 0;
 float g_vrTwoHandWeaponLastActiveTargetAxis[3][3] = {};
@@ -613,6 +630,16 @@ bool g_vrLoggedDedicatedScopeSample = false;
 
 constexpr std::uint32_t kVrStereoEyeCount = 2u;
 
+// -------------------------------------------------------------------------
+// Static 3D World Canvas Poses (Menus, Pause Screen, Cutscenes)
+// -------------------------------------------------------------------------
+static bool s_staticWorldCanvasActive = false;
+static XrPosef s_latchedStaticCanvasPose[kVrStereoEyeCount] = {};
+static XrFovf s_latchedStaticCanvasFov[kVrStereoEyeCount] = {};
+
+static bool s_openVrStaticCanvasActive = false;
+static vr::HmdMatrix34_t s_latchedOpenVrHeadPose = {};
+
 ComPtr<ID3D11Texture2D>
     g_vrCapturedStereoTexture;
 
@@ -865,12 +892,6 @@ bool g_vrSnapTurnArmed = true;
 bool g_vrRightThumbrestTouched = false;
 
 // KISAK_SP_VR_SMOOTH_TURN_OPTION_V50
-enum class VrTurnMode
-{
-    Snap,
-    Smooth,
-};
-
 VrTurnMode g_vrTurnMode =
     VrTurnMode::Snap;
 
@@ -878,6 +899,22 @@ float g_vrSmoothTurnSpeedDegreesPerSecond =
     120.0f;
 
 bool g_vrTurnSettingsLoaded = false;
+
+// Virtual Gunstock / Aim Stabilization
+bool g_vrVirtualStockEnabled = true;
+
+// 3D Diegetic Compass Mode
+VrCompassMode g_vrCompassMode = VrCompassMode::DiegeticWrist;
+
+// Operator Model Customization
+int g_vrPlayerFactionOverride = -1;
+
+// In-Game T-Pose Calibration Wizard
+VrTPoseCalibrationTelemetry g_vrTPoseTelemetry = {};
+bool g_vrTPoseWizardActive = false;
+std::uint32_t g_vrTPoseHoldStartMs = 0u;
+bool g_vrTPoseConfirmed = false;
+std::uint32_t g_vrTPoseConfirmedMs = 0u;
 
 // KISAK_SP_VR_CONFIGURATOR_V56
 // Settings introduced by the standalone configurator remain environment
@@ -2374,6 +2411,7 @@ bool g_vrConfiguredAimHeld = false;
 // the left index trigger now owns jump.
 bool g_vrLeftTriggerJumpHeld = false;
 bool g_vrRightAButtonHeld = false;
+bool g_vrRightBEjectHeld = false;
 bool g_vrLeftXUseHeld = false;
 
 bool g_vrLeftStickSprintHeld = false;
@@ -2410,12 +2448,14 @@ struct VrManualMagazineReloadState
     int weaponIndex = 0;
     VrManualMagazineReloadStage stage =
         VrManualMagazineReloadStage::Ready;
+    bool loadedMagazineStillInWeapon = false;
     bool ejectButtonWasHeld = false;
     bool leftSqueezeWasHeld = false;
     bool heldNearMagazineWell = false;
     bool heldPoseValid = false;
     std::uint32_t ejectedAtMilliseconds = 0u;
     std::uint32_t commitUntilMilliseconds = 0u;
+    std::uint32_t magKnockCooldownUntilMilliseconds = 0u;
     float magazineWellOrigin[3] = {};
     float magazineWellAxis[3][3] = {
         {1.0f, 0.0f, 0.0f},
@@ -2482,6 +2522,8 @@ struct VrPhysicalBodyRigState
     float knifeStrikeForwardWorld[3] = {1.0f, 0.0f, 0.0f};
     float knifeStrikeRightWorld[3] = {0.0f, 1.0f, 0.0f};
     float knifeStrikeUpWorld[3] = {0.0f, 0.0f, 1.0f};
+
+    bool weaponHolstered = false;
 };
 
 VrPhysicalBodyRigState
@@ -2522,11 +2564,18 @@ struct VrManualGrenadeState
     bool settingRead = false;
     bool enabled = true;
     VrGrenades::GripState gripInput;
+    VrGrenades::GripState weaponGripInput;
+    VrGrenades::Pouch offhandHover = VrGrenades::Pouch::None;
+    VrGrenades::Pouch weaponHandHover = VrGrenades::Pouch::None;
+    std::array<VrGrenades::ReturnRequest, 8> returns = {};
+    std::size_t returnWriteIndex = 0u;
     VrManualGrenadeStage stage =
         VrManualGrenadeStage::Ready;
     VrManualGrenadeSlot slot =
         VrManualGrenadeSlot::None;
     bool inWeaponHand = false;
+    bool releasePoseValid = false;
+    bool pinPulled = false;
     int weaponIndex = 0;
     std::uint32_t releasedAtMilliseconds = 0u;
     std::uint32_t pendingUntilMilliseconds = 0u;
@@ -2555,6 +2604,12 @@ struct VrManualGrenadeState
 VrManualGrenadeState
     g_vrManualGrenade;
 
+bool g_vrSeatedMode = false;
+bool g_vrHoldToGripEnabled = true;
+bool g_vrMenuLaserActive = false;
+float g_vrMenuLaserScreenX = 320.0f;
+float g_vrMenuLaserScreenY = 240.0f;
+bool g_vrMenuLaserClicked = false;
 
 std::vector<XrViewConfigurationView> g_vrViewConfigs;
 std::vector<XrView> g_vrViews;
@@ -3602,70 +3657,119 @@ float4 VR_ApplyFixedScopedTurretOverlay(
         float3(0.01f, 0.01f, 0.01f),
         reticle);
 
+    return color;
+}
+)" R"(
 float3 VR_Render3DVolumetricSmokeMenu(float2 pixelPos, float2 inputUv)
 {
     const float2 eyeUv = pixelPos * vrCompositorSettings.zw;
-    const float2 centeredUv = eyeUv - float2(0.5f, 0.5f);
     const float time = vrSpatialEnvironment.z;
     const float aspect = max(vrSpatialEnvironment.w, 0.5f);
 
-    const float2 p = centeredUv * float2(aspect, 1.0f);
-    const float3 ray = normalize(float3(p, 1.35f));
+    const float2 roomUv = eyeUv - vrFixedScopeZoom.xy;
+    const float2 p = roomUv * float2(aspect, 1.0f);
+    const float3 ray = normalize(float3(p, 1.48f));
 
-    float3 q1 = ray * 2.4f + float3(time * 0.08f, time * 0.05f, -time * 0.04f);
-    float n1 = sin(q1.x * 2.2f + sin(q1.y * 2.8f + q1.z * 1.4f));
-    float n2 = cos(q1.y * 3.4f + sin(q1.z * 2.2f + q1.x * 1.1f));
-    float n3 = sin(q1.z * 3.8f + cos(q1.x * 2.7f + q1.y * 2.0f));
+    // Multi-layered volumetric smoke/fog styled to match the CoD4 main loading screen
+    // (deep tactical charcoal-emerald atmosphere with rolling phosphor-green smoke plumes)
+    float3 q1 = ray * 2.15f + float3(time * 0.065f, time * 0.042f, -time * 0.035f);
+    float n1 = sin(q1.x * 2.1f + sin(q1.y * 2.7f + q1.z * 1.5f));
+    float n2 = cos(q1.y * 3.2f + sin(q1.z * 2.3f + q1.x * 1.2f));
+    float n3 = sin(q1.z * 3.6f + cos(q1.x * 2.5f + q1.y * 1.9f));
     float smokeLow = (n1 + n2 + n3) * 0.333f * 0.5f + 0.5f;
 
-    float3 q2 = ray * 5.2f - float3(time * 0.06f, -time * 0.04f, time * 0.05f);
-    float n4 = sin(q2.x * 3.5f + cos(q2.y * 4.2f));
-    float n5 = cos(q2.y * 4.6f + sin(q2.z * 3.1f));
-    float smokeHigh = (n4 + n5) * 0.5f * 0.5f + 0.5f;
+    float3 q2 = ray * 4.6f - float3(time * 0.052f, -time * 0.038f, time * 0.044f);
+    float n4 = sin(q2.x * 3.4f + cos(q2.y * 4.0f + n1 * 0.8f));
+    float n5 = cos(q2.y * 4.4f + sin(q2.z * 3.2f + n2 * 0.8f));
+    float smokeMid = (n4 + n5) * 0.5f * 0.5f + 0.5f;
 
-    float totalSmoke = smokeLow * 0.65f + smokeHigh * 0.35f;
+    float3 q3 = ray * 8.4f + float3(-time * 0.035f, time * 0.075f, time * 0.025f);
+    float n6 = sin(q3.x * 4.8f - sin(q3.y * 5.1f + q3.z * 2.7f));
+    float smokeFine = n6 * 0.5f + 0.5f;
 
-    const float3 bgDark = float3(0.012f, 0.035f, 0.016f);
-    const float3 smokeGreen = float3(0.048f, 0.145f, 0.062f) * (0.65f + 0.75f * totalSmoke);
-    const float vignette = 1.0f - smoothstep(0.38f, 0.95f, length(centeredUv));
-    const float scanline = 0.96f + 0.04f * sin(pixelPos.y * 2.2f);
-    float3 volumetricBg = (bgDark + smokeGreen * vignette) * scanline;
+    float totalSmoke = saturate(smokeLow * 0.52f + smokeMid * 0.33f + smokeFine * 0.15f);
+    float billow = smoothstep(0.22f, 0.88f, totalSmoke);
 
-    const float curve = centeredUv.x * centeredUv.x * 0.06f;
-    const float2 menuUv = float2(
-        centeredUv.x * 1.28f * (1.0f + curve) + 0.5f,
-        centeredUv.y * 1.28f * (1.0f + curve) + 0.5f);
+    // Miniature theater architectural enclosure around the recessed screen
+    const float2 screenP = (eyeUv - vrFixedScopeSettings.zw) * float2(aspect, 1.0f);
+    const float curve = screenP.x * screenP.x * 0.055f;
+    const float2 curvedP = float2(screenP.x * (1.0f + curve), screenP.y * (1.0f + curve));
+    // Pushed further away into a dedicated miniature theater stage
+    const float2 screenHalfExtents = float2(0.225f, 0.16875f);
+    const float2 screenNorm = curvedP / screenHalfExtents;
 
-    float3 finalColor = volumetricBg;
-    if (menuUv.x >= 0.0f && menuUv.x <= 1.0f &&
-        menuUv.y >= 0.0f && menuUv.y <= 1.0f)
+    const float sideWallDist = max(0.0f, abs(p.x) - 0.24f);
+    const float sideWallRibs = 0.5f + 0.5f * cos(sideWallDist * 52.0f);
+    const float floorGradient = saturate((p.y - 0.14f) / 0.42f);
+    const float floorAisleSteps = (0.5f + 0.5f * sin(p.y * 68.0f)) * smoothstep(0.26f, 0.04f, abs(p.x));
+    const float ceilingGradient = saturate((-p.y - 0.15f) / 0.42f);
+    const float prosceniumDist = max(abs(screenNorm.x) - 1.02f, abs(screenNorm.y) - 1.02f);
+    const float prosceniumArch = exp(-abs(prosceniumDist) * 18.0f);
+
+    // Authentic Call of Duty 4 Main Menu atmosphere:
+    // Dark gunmetal slate, charcoal shadow tones, and rolling tactical volumetric smoke with subtle warm amber highlights
+    const float3 theaterBase = float3(0.012f, 0.014f, 0.017f);
+    const float3 theaterArchitecture =
+        float3(0.020f, 0.024f, 0.028f) * (sideWallRibs * smoothstep(0.20f, 0.52f, abs(p.x)) * 0.65f) +
+        float3(0.015f, 0.018f, 0.022f) * (floorGradient * (0.55f + 0.45f * floorAisleSteps)) +
+        float3(0.012f, 0.015f, 0.018f) * (ceilingGradient * 0.45f) +
+        float3(0.035f, 0.032f, 0.025f) * (prosceniumArch * 0.70f);
+
+    // Overhead projector beam & volumetric haze cone through the miniature theater
+    const float beamCone = exp(-pow(abs(p.x) / max(0.16f, 0.36f - p.y * 0.35f), 2.0f) * 1.85f) *
+                           smoothstep(0.45f, -0.38f, p.y);
+    const float3 smokeCharcoal = float3(0.022f, 0.026f, 0.030f);
+    const float3 smokeWarmAmber = float3(0.052f, 0.045f, 0.032f);
+    const float3 smokeColor = lerp(smokeCharcoal, smokeWarmAmber, billow * 0.45f) *
+                              (0.58f + 0.65f * totalSmoke + 0.42f * beamCone);
+
+    const float radialDepth = 1.0f - smoothstep(0.18f, 0.96f, length(roomUv));
+    const float scanline = 0.965f + 0.035f * sin(pixelPos.y * 2.1f);
+    float3 volumetricTheater = (theaterBase + theaterArchitecture + smokeColor * (0.45f + 0.55f * radialDepth)) * scanline;
+
+    float3 finalColor = volumetricTheater;
+    if (abs(screenNorm.x) <= 1.0f && abs(screenNorm.y) <= 1.0f)
     {
-        const float2 menuSrcUv = float2(menuUv.x * 0.5f, menuUv.y);
+        const float2 menuUv = screenNorm * 0.5f + float2(0.5f, 0.5f);
+        const float2 menuSrcUv = float2(
+            menuUv.x * 0.5f * vrCompositorSettings.y,
+            menuUv.y);
         const float4 uiSample = capturedFrame.Sample(capturedSampler, menuSrcUv);
 
         const float uiLuma = max(uiSample.r, max(uiSample.g, uiSample.b));
-        const float uiAlpha = smoothstep(0.03f, 0.12f, uiLuma);
+        const float edgeDist = max(abs(screenNorm.x), abs(screenNorm.y));
+        const float frameFade = smoothstep(1.00f, 0.968f, edgeDist);
 
-        const float borderDist = max(abs(menuUv.x - 0.5f), abs(menuUv.y - 0.5f));
-        const float frameFade = smoothstep(0.50f, 0.485f, borderDist);
+        // Gently bathe the recessed theater screen in volumetric room fog across dark regions
+        const float3 screenSmokeOverlay =
+            smokeColor * (0.28f + 0.22f * billow) * (1.0f - saturate(uiLuma * 2.2f));
+        const float3 panelColor = uiSample.rgb + screenSmokeOverlay;
+        finalColor = lerp(volumetricTheater, panelColor, frameFade);
 
-        finalColor = lerp(volumetricBg, uiSample.rgb, uiAlpha * frameFade);
-
-        const float rim = (1.0f - smoothstep(0.0f, 0.02f, abs(borderDist - 0.495f))) * 0.35f;
-        finalColor += float3(0.06f, 0.22f, 0.08f) * rim;
+        const float rim = (1.0f - smoothstep(0.0f, 0.03f, abs(edgeDist - 0.985f))) * 0.45f;
+        finalColor += float3(0.18f, 0.35f, 0.22f) * rim;
+    }
+    else
+    {
+        //Foreground volumetric smoke wisps drifting in front of the proscenium stage
+        const float stageProximity = exp(-max(0.0f, prosceniumDist) * 4.5f);
+        finalColor += smokeColor * (0.22f * billow * stageProximity);
     }
 
     return finalColor;
 }
+)" R"(
 
 float3 VR_Render3DVirtualTheaterCutscene(float2 pixelPos, float2 inputUv)
 {
     const float2 eyeUv = pixelPos * vrCompositorSettings.zw;
-    const float2 p = eyeUv - float2(0.5f, 0.5f);
+    const float aspect = max(vrSpatialEnvironment.w, 0.5f);
+    const float2 p = (eyeUv - vrFixedScopeSettings.zw) * float2(aspect, 1.0f);
+    const float2 roomP = (eyeUv - vrFixedScopeZoom.xy) * float2(aspect, 1.0f);
 
-    const float curve = p.x * p.x * 0.18f;
+    const float curve = p.x * p.x * 0.14f;
     const float2 curvedP = float2(p.x * (1.0f + curve), p.y * (1.0f + curve));
-    const float2 screenHalfExtents = float2(0.42f, 0.26f);
+    const float2 screenHalfExtents = float2(0.38f, 0.285f);
     const float2 screenNorm = curvedP / screenHalfExtents;
 
     const bool insideScreen =
@@ -3673,16 +3777,16 @@ float3 VR_Render3DVirtualTheaterCutscene(float2 pixelPos, float2 inputUv)
         abs(screenNorm.y) <= 1.0f;
 
     const float2 movieUv = screenNorm * 0.5f + float2(0.5f, 0.5f);
-    const float2 clampedMovieUv = clamp(movieUv, float2(0.05f, 0.05f), float2(0.95f, 0.95f));
+    const float2 clampedMovieUv = clamp(movieUv, float2(0.08f, 0.18f), float2(0.92f, 0.82f));
     const float4 ambilight = capturedFrame.Sample(
         capturedSampler,
-        float2(clampedMovieUv.x * 0.5f, clampedMovieUv.y));
+        float2(clampedMovieUv.x * 0.5f * vrCompositorSettings.y, clampedMovieUv.y));
 
     if (insideScreen)
     {
         const float4 videoSample = capturedFrame.Sample(
             capturedSampler,
-            float2(movieUv.x * 0.5f, movieUv.y));
+            float2(movieUv.x * 0.5f * vrCompositorSettings.y, movieUv.y));
 
         const float edgeDist = max(abs(screenNorm.x), abs(screenNorm.y));
         const float bezelHighlight =
@@ -3693,29 +3797,29 @@ float3 VR_Render3DVirtualTheaterCutscene(float2 pixelPos, float2 inputUv)
     }
 
     float ceilingGlow = 0.0f;
-    if (p.y < -screenHalfExtents.y)
+    if (roomP.y < -screenHalfExtents.y)
     {
-        float d = (-p.y - screenHalfExtents.y);
+        float d = (-roomP.y - screenHalfExtents.y);
         ceilingGlow = exp(-d * 4.2f) * 0.45f;
     }
 
     float wallGlow = 0.0f;
-    if (abs(p.x) > screenHalfExtents.x)
+    if (abs(roomP.x) > screenHalfExtents.x)
     {
-        float d = abs(p.x) - screenHalfExtents.x;
-        float ribbing = 0.85f + 0.15f * cos(p.y * 50.0f);
+        float d = abs(roomP.x) - screenHalfExtents.x;
+        float ribbing = 0.85f + 0.15f * cos(roomP.y * 50.0f);
         wallGlow = exp(-d * 3.6f) * 0.55f * ribbing;
     }
 
     float floorGlow = 0.0f;
-    if (p.y > screenHalfExtents.y)
+    if (roomP.y > screenHalfExtents.y)
     {
-        float d = (p.y - screenHalfExtents.y);
+        float d = (roomP.y - screenHalfExtents.y);
         float steps = 0.88f + 0.12f * sin(d * 40.0f);
         floorGlow = exp(-d * 3.2f) * 0.40f * steps;
     }
 
-    const float beamHaze = exp(-length(p) * 1.8f) * 0.07f;
+    const float beamHaze = exp(-length(roomP) * 1.8f) * 0.07f;
     const float totalBounce = ceilingGlow + wallGlow + floorGlow + beamHaze;
     const float3 theaterBase = float3(0.012f, 0.014f, 0.018f);
 
@@ -5249,11 +5353,50 @@ std::uint32_t VR_GetCapturedMainStereoWidth()
     return g_vrCapturedStereoWidth;
 }
 
+bool VR_IsCutsceneTheaterActive()
+{
+    const connstate_t state = clientUIActives[0].connectionState;
+    if (state == CA_CINEMATIC || state == CA_LOGO)
+    {
+        return true;
+    }
+
+    const char* topMenuName = UI_GetTopActiveMenuName(0);
+    if (topMenuName != nullptr &&
+        (I_stricmp(topMenuName, "pregame") == 0 ||
+         I_stricmp(topMenuName, "victoryscreen") == 0))
+    {
+        return true;
+    }
+
+    if ((R_Cinematic_IsStarted() || R_Cinematic_IsPending()) &&
+        (state == CA_LOADING ||
+         state == CA_MAP_RESTART ||
+         (state == CA_ACTIVE && !Key_IsCatcherActive(0, 0x10))))
+    {
+        return true;
+    }
+
+    return false;
+}
+
+bool VR_IsSpatial3DMenuActive()
+{
+    if (VR_IsCutsceneTheaterActive())
+    {
+        return false;
+    }
+
+    return clientUIActives[0].connectionState < CA_ACTIVE &&
+           Key_IsCatcherActive(0, 0x10);
+}
+
 // KISAK_SP_VR_FIXED_SCOPE_BINOCULAR_RETICLE_FIX_V2
 void VR_UpdateCompositorConstantsForEye(
     const D3D11_VIEWPORT& eyeViewport,
     const int eyeWidth,
-    const int eyeHeight)
+    const int eyeHeight,
+    const std::uint32_t eyeIndex = 0u)
 {
     if (!g_vrCompositorConstantBuffer ||
         !g_vrD3dContext ||
@@ -5482,24 +5625,60 @@ void VR_UpdateCompositorConstantsForEye(
     }
 
     float spatialMode = 0.0f;
-    if (clientUIActives[0].connectionState == CA_CINEMATIC)
+    if (VR_IsCutsceneTheaterActive())
     {
         spatialMode = 2.0f; // 3D Virtual Theater Cutscene
     }
-    else if (clientUIActives[0].connectionState < CA_ACTIVE &&
-             Key_IsCatcherActive(0, 0x10))
+    else if (VR_IsSpatial3DMenuActive())
     {
         spatialMode = 1.0f; // 3D Volumetric Smoky Main Menu
     }
 
     constants.spatialEnvironment[0] = spatialMode;
-    constants.spatialEnvironment[1] = 0.0f;
+    constants.spatialEnvironment[1] = static_cast<float>(eyeIndex);
     constants.spatialEnvironment[2] =
         static_cast<float>(Sys_Milliseconds()) * 0.001f;
     constants.spatialEnvironment[3] =
         eyeHeight > 0
             ? static_cast<float>(eyeWidth) / static_cast<float>(eyeHeight)
             : 1.0f;
+
+    if (spatialMode > 0.5f)
+    {
+        float opticalCenterX = 0.5f;
+        float opticalCenterY = 0.5f;
+
+        {
+            std::lock_guard<std::mutex> lock(g_vrProjectionMutex);
+            if (g_vrEyeProjectionValid && eyeIndex < kVrStereoEyeCount)
+            {
+                const VrEyeProjectionTangents& proj =
+                    g_vrEyeProjectionTangents[eyeIndex];
+                const float sx = proj.right - proj.left;
+                const float sy = proj.up - proj.down;
+                if (sx > 0.05f && sy > 0.05f)
+                {
+                    opticalCenterX = -proj.left / sx;
+                    opticalCenterY = proj.up / sy;
+                }
+            }
+        }
+
+        const float stereoDisparity =
+            (spatialMode == 1.0f)
+                ? ((eyeIndex == 0u) ? 0.0022f : -0.0022f)
+                : ((eyeIndex == 0u) ? 0.0045f : -0.0045f);
+
+        constants.fixedScope[0] = 0.0f;
+        constants.fixedScope[2] =
+            opticalCenterX + stereoDisparity;
+        constants.fixedScope[3] =
+            opticalCenterY;
+        constants.fixedScopeZoom[0] =
+            opticalCenterX;
+        constants.fixedScopeZoom[1] =
+            opticalCenterY;
+    }
 
     D3D11_MAPPED_SUBRESOURCE mapped = {};
 
@@ -9412,6 +9591,8 @@ void VR_DestroyControllerInput()
         g_vrRightControllerFinalWeaponMuzzleValid = false;
         g_vrRightControllerFinalWeaponMuzzleBlocked = false;
         g_vrRightControllerAttackPressed = false;
+        g_vrRightControllerSqueezePressedRaw = false;
+        g_vrRightControllerSqueezeAvailable = false;
 
         g_vrRightControllerFinalWeaponForward[0] = 1.0f;
         g_vrRightControllerFinalWeaponForward[1] = 0.0f;
@@ -12448,6 +12629,7 @@ void VR_ApplyControllerInputState(
             g_vrLeftStickSprintHeld = false;
             g_vrLeftYNextWeaponHeld = false;
             g_vrRightAButtonHeld = false;
+            g_vrRightBEjectHeld = false;
             g_vrRightStickMeleeHeld = false;
             g_vrRightBStanceHeld = false;
             g_vrLowerStanceHeld = false;
@@ -12500,30 +12682,46 @@ void VR_ApplyControllerInputState(
         g_vrRightThumbrestTouched =
             missionMovementLockHeld;
 
-        g_vrConfiguredAimHeld =
-            isHeld(VrInput::Action::Aim);
+        // Strict VR controller mapping enforcement:
+        // - Triggers: Fire weapon (Attack). Left trigger does not ADS or jump.
+        // - Grip: Front weapon grip / pistol support, knife, grenades, body holsters, magazines.
+        // - A Button (default Action::Reload = right.primary): Jump (+ right-stick up).
+        // - X Button (default Action::Use = left.primary): Interact / Pick up weapons (never reloads).
+        // - B Button (default Action::Stance = right.secondary): Universal magazine eject.
+        // - Analog sticks: Move/Turn, left-stick click Sprint, right-stick vertical Crouch/Prone.
+        // - All other unmapped controls remain inactive.
+        (void)isHeld(VrInput::Action::Aim);
+        (void)isHeld(VrInput::Action::Jump);
+        (void)isHeld(VrInput::Action::NextWeapon);
+        (void)isHeld(VrInput::Action::Melee);
+        (void)isHeld(VrInput::Action::Offhand);
+        (void)isHeld(VrInput::Action::ThrowBack);
+
+        const bool rightStickUpHeld =
+            turnAxisValid &&
+            !missionMovementLockHeld &&
+            turnAxis.y >= 0.65f;
+
+        g_vrConfiguredAimHeld = false;
 
         g_vrLeftTriggerJumpHeld =
-            isHeld(VrInput::Action::Jump);
+            isHeld(VrInput::Action::Reload) ||
+            rightStickUpHeld;
         g_vrLeftXUseHeld =
             isHeld(VrInput::Action::Use);
         g_vrLeftStickSprintHeld =
             isHeld(VrInput::Action::Sprint);
-        g_vrLeftYNextWeaponHeld =
-            isHeld(VrInput::Action::NextWeapon);
+        g_vrLeftYNextWeaponHeld = false;
 
-        g_vrRightAButtonHeld =
-            isHeld(VrInput::Action::Reload);
-        g_vrRightStickMeleeHeld =
-            isHeld(VrInput::Action::Melee);
-        g_vrRightBStanceHeld =
+        g_vrRightAButtonHeld = false;
+        g_vrRightBEjectHeld =
             isHeld(VrInput::Action::Stance);
+        g_vrRightStickMeleeHeld = false;
+        g_vrRightBStanceHeld = false;
         g_vrLowerStanceHeld =
             isHeld(VrInput::Action::LowerStance);
-        g_vrNativeOffhandHeld =
-            isHeld(VrInput::Action::Offhand);
-        g_vrThrowBackHeld =
-            isHeld(VrInput::Action::ThrowBack);
+        g_vrNativeOffhandHeld = false;
+        g_vrThrowBackHeld = false;
 
         g_vrLeftMenuHeld =
             isHeld(VrInput::Action::PauseMenu);
@@ -12625,7 +12823,8 @@ void VR_ApplyControllerInputState(
         anyMissionShortcutHeld =
             anyMissionShortcutHeld || inputHeld[actionIndex];
 
-        if (gameplayInputAllowed &&
+        if (false &&
+            gameplayInputAllowed &&
             g_vrMissionShortcutArmed &&
             inputHeld[actionIndex] &&
             !g_vrInputActionPreviousHeld[actionIndex])
@@ -12753,18 +12952,18 @@ bool VR_IsSupportGripCandidateLocked()
 
     const float minimumDistance =
         g_vrTwoHandWeaponTargetActive
-            ? 3.0f
-            : 4.0f;
+            ? 0.5f
+            : 1.0f;
 
     const float maximumDistance =
         g_vrTwoHandWeaponTargetActive
-            ? 36.0f
+            ? 46.0f
             : 32.0f;
 
     const float minimumForwardDistance =
         g_vrTwoHandWeaponTargetActive
-            ? -1.0f
-            : 1.0f;
+            ? -8.0f
+            : -3.5f;
 
     return
         handDistance >= minimumDistance &&
@@ -13074,6 +13273,7 @@ void VR_UpdateControllerActions(
             g_vrWeaponControllerPoseMutex);
         g_vrRightControllerSqueezePressedRaw =
             weaponGripValid && weaponGripActive && weaponGripPressed;
+        g_vrRightControllerSqueezeAvailable = weaponGripValid && weaponGripActive;
     }
 
     const VrControllerRenderPose&
@@ -14473,7 +14673,7 @@ void VR_UpdateMenuControllerNavigation()
         }
 
         confirmHeld =
-            g_vrMenuConfirmHeld;
+            g_vrMenuConfirmHeld || g_vrRightControllerAttackPressed;
 
         backHeld =
             g_vrMenuBackHeld;
@@ -14596,6 +14796,40 @@ void VR_UpdateMenuControllerNavigation()
 
     bool cursorMoved = false;
 
+    // In-world hand laser pointer projection onto the 3D menu canvas
+    if (g_vrRightControllerWeaponPoseValid)
+    {
+        const XrQuaternionf& q = g_vrRightControllerFilteredAimOrientation;
+        const float fwdX = -2.0f * (q.x * q.z + q.w * q.y);
+        const float fwdY = 2.0f * (q.w * q.x - q.y * q.z);
+        const float fwdZ = -1.0f + 2.0f * (q.x * q.x + q.y * q.y);
+        const float rayYaw = std::atan2(fwdX, -fwdZ);
+        const float rayPitch = std::asin(std::clamp(fwdY, -1.0f, 1.0f));
+
+        constexpr float fovHalfX = 0.55f;
+        constexpr float fovHalfY = 0.40f;
+        const float normX = (std::tan(rayYaw) / std::tan(fovHalfX)) * 0.5f + 0.5f;
+        const float normY = (-std::tan(rayPitch) / std::tan(fovHalfY)) * 0.5f + 0.5f;
+
+        if (normX >= -0.05f && normX <= 1.05f && normY >= -0.05f && normY <= 1.05f)
+        {
+            cursorX = std::clamp(normX, 0.0f, 1.0f) * static_cast<float>(cursorWidth - 1u);
+            cursorY = std::clamp(normY, 0.0f, 1.0f) * static_cast<float>(cursorHeight - 1u);
+            cursorMoved = true;
+            g_vrMenuLaserActive = true;
+            g_vrMenuLaserScreenX = cursorX;
+            g_vrMenuLaserScreenY = cursorY;
+        }
+        else
+        {
+            g_vrMenuLaserActive = false;
+        }
+    }
+    else
+    {
+        g_vrMenuLaserActive = false;
+    }
+
     if (stickValid)
     {
         if (std::fabs(stickX) < deadzone)
@@ -14668,6 +14902,7 @@ void VR_UpdateMenuControllerNavigation()
     if (confirmHeld &&
         !confirmWasHeld)
     {
+        g_vrMenuLaserClicked = true;
         // K_MOUSE1. The normal UI path activates the item beneath
         // the virtual cursor and preserves menu scripts and sounds.
         VR_SendMenuKeyTap(
@@ -14901,9 +15136,9 @@ bool VR_RenderSolidColorFrame(
     }
 
     constexpr float clearColor[4] = {
-        0.03f,
-        0.08f,
-        0.20f,
+        0.0f,
+        0.0f,
+        0.0f,
         1.0f,
     };
 
@@ -14912,89 +15147,79 @@ bool VR_RenderSolidColorFrame(
             0,
             0x10);
 
+    const bool isCutsceneTheater =
+        VR_IsCutsceneTheaterActive();
+    const bool isSpatialEnvironment =
+        isCutsceneTheater || VR_IsSpatial3DMenuActive();
+    const bool isStaticWorldCanvas =
+        isCutsceneTheater || menuComfortMode || (clientUIActives[0].connectionState < CA_ACTIVE);
+
     // KISAK_SP_VR_EYE_LOCAL_SHARED_MODAL_V88
     // Centered dialogs are still painted once in the shared list, but V82
     // authors that list in the left eye. The dedicated modal buffer therefore
     // samples the same left-eye region as frontend UI instead of 25%-75%.
     const bool centeredModalComfortMode =
         menuComfortMode &&
+        !isSpatialEnvironment &&
         VR_IsCenteredMonoscopicMenuActive();
 
     const bool activePauseComfortMode =
         menuComfortMode &&
+        !isSpatialEnvironment &&
         !centeredModalComfortMode &&
         clientUIActives[0].connectionState ==
             CA_ACTIVE;
 
-    XrPosef menuComfortPose = {};
-    XrFovf menuComfortFov = {};
     bool menuComfortProjectionValid = false;
 
-    if (menuComfortMode &&
-        locatedViewCount >=
-            kVrStereoEyeCount)
+    if (isStaticWorldCanvas && locatedViewCount >= kVrStereoEyeCount)
     {
-        std::array<
-            XrView,
-            kVrStereoEyeCount>
-            menuSourceViews = {};
-
-        if (submissionViewsValid)
+        if (!s_staticWorldCanvasActive)
         {
-            menuSourceViews =
-                submissionViews;
-        }
-        else if (g_vrPublishedRenderViewsValid)
-        {
-            menuSourceViews =
-                g_vrPublishedRenderViews;
-        }
-        else
-        {
-            for (std::uint32_t eyeIndex = 0u;
-                 eyeIndex < kVrStereoEyeCount;
-                 ++eyeIndex)
+            for (std::uint32_t eyeIndex = 0u; eyeIndex < kVrStereoEyeCount; ++eyeIndex)
             {
-                menuSourceViews[eyeIndex] =
-                    g_vrViews[eyeIndex];
+                if (submissionViewsValid && eyeIndex < submissionViews.size())
+                {
+                    s_latchedStaticCanvasPose[eyeIndex] = submissionViews[eyeIndex].pose;
+                    s_latchedStaticCanvasFov[eyeIndex] = submissionViews[eyeIndex].fov;
+                }
+                else if (eyeIndex < g_vrViews.size())
+                {
+                    s_latchedStaticCanvasPose[eyeIndex] = g_vrViews[eyeIndex].pose;
+                    s_latchedStaticCanvasFov[eyeIndex] = g_vrViews[eyeIndex].fov;
+                }
             }
+
+            // Center eye position to avoid artificial disparity when viewing 2D canvases
+            const float avgX = 0.5f * (s_latchedStaticCanvasPose[0].position.x + s_latchedStaticCanvasPose[1].position.x);
+            const float avgY = 0.5f * (s_latchedStaticCanvasPose[0].position.y + s_latchedStaticCanvasPose[1].position.y);
+            const float avgZ = 0.5f * (s_latchedStaticCanvasPose[0].position.z + s_latchedStaticCanvasPose[1].position.z);
+            s_latchedStaticCanvasPose[0].position.x = avgX;
+            s_latchedStaticCanvasPose[0].position.y = avgY;
+            s_latchedStaticCanvasPose[0].position.z = avgZ;
+            s_latchedStaticCanvasPose[1].position.x = avgX;
+            s_latchedStaticCanvasPose[1].position.y = avgY;
+            s_latchedStaticCanvasPose[1].position.z = avgZ;
+
+            s_latchedStaticCanvasPose[1].orientation = s_latchedStaticCanvasPose[0].orientation;
+
+            s_staticWorldCanvasActive = true;
         }
 
-        menuComfortPose =
-            menuSourceViews[0].pose;
+        if (menuComfortMode && !isSpatialEnvironment)
+        {
+            s_latchedStaticCanvasFov[0].angleLeft = -0.62f;
+            s_latchedStaticCanvasFov[0].angleRight = 0.62f;
+            s_latchedStaticCanvasFov[0].angleUp = 0.38f;
+            s_latchedStaticCanvasFov[0].angleDown = -0.38f;
+            s_latchedStaticCanvasFov[1] = s_latchedStaticCanvasFov[0];
+        }
 
-        menuComfortPose.position.x =
-            0.5f *
-            (menuSourceViews[0].pose.position.x +
-             menuSourceViews[1].pose.position.x);
-
-        menuComfortPose.position.y =
-            0.5f *
-            (menuSourceViews[0].pose.position.y +
-             menuSourceViews[1].pose.position.y);
-
-        menuComfortPose.position.z =
-            0.5f *
-            (menuSourceViews[0].pose.position.z +
-             menuSourceViews[1].pose.position.z);
-
-        // Give both eyes exactly the same centered optical frustum.
-        // This creates zero binocular disparity for the copied 2D menu
-        // and also keeps it smaller than the full gameplay FOV.
-        menuComfortFov.angleLeft =
-            -0.62f;
-
-        menuComfortFov.angleRight =
-            0.62f;
-
-        menuComfortFov.angleUp =
-            0.38f;
-
-        menuComfortFov.angleDown =
-            -0.38f;
-
-        menuComfortProjectionValid =
-            true;
+        menuComfortProjectionValid = true;
+    }
+    else
+    {
+        s_staticWorldCanvasActive = false;
     }
 
     if (menuComfortMode &&
@@ -15134,6 +15359,7 @@ bool VR_RenderSolidColorFrame(
         viewport.MaxDepth = 1.0f;
 
         if (menuComfortMode &&
+            !isSpatialEnvironment &&
             g_vrCapturedStereoWidth > 0u &&
             g_vrCapturedStereoHeight > 0u)
         {
@@ -15187,6 +15413,7 @@ bool VR_RenderSolidColorFrame(
         }
 
         if (!menuComfortMode &&
+            !isSpatialEnvironment &&
             submissionViewsValid &&
             eyeIndex < submissionViews.size())
         {
@@ -15203,7 +15430,8 @@ bool VR_RenderSolidColorFrame(
         VR_UpdateCompositorConstantsForEye(
             viewport,
             eyeSwapchain.width,
-            eyeSwapchain.height);
+            eyeSwapchain.height,
+            eyeIndex);
 
         g_vrD3dContext->RSSetViewports(1, &viewport);
         g_vrD3dContext->RSSetState(
@@ -15216,13 +15444,13 @@ bool VR_RenderSolidColorFrame(
         ID3D11ShaderResourceView* capturedView =
             g_vrCapturedStereoView.Get();
 
-        const bool isCinematic =
-            clientUIActives[0].connectionState == CA_CINEMATIC;
+        const bool isCinematic = isCutsceneTheater;
 
         bool fsrRendered = false;
 
         if (capturedView != nullptr &&
             !menuComfortMode &&
+            !isSpatialEnvironment &&
             !isCinematic)
         {
             fsrRendered =
@@ -15260,7 +15488,7 @@ bool VR_RenderSolidColorFrame(
                     ? g_vrCenteredModalBlitVertexBuffer.Get()
                     : activePauseComfortMode
                     ? g_vrPauseMenuBlitVertexBuffer.Get()
-                    : (menuComfortMode || isCinematic)
+                    : (menuComfortMode || isSpatialEnvironment || isCinematic)
                         ? g_vrMenuBlitVertexBuffer.Get()
                         : (
                             eyeIndex <
@@ -15413,13 +15641,13 @@ bool VR_RenderSolidColorFrame(
                 XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW
             };
 
-        if (menuComfortProjectionValid)
+        if (s_staticWorldCanvasActive)
         {
             projectionView.pose =
-                menuComfortPose;
+                s_latchedStaticCanvasPose[eyeIndex];
 
             projectionView.fov =
-                menuComfortFov;
+                s_latchedStaticCanvasFov[eyeIndex];
         }
         else if (submissionViewsValid &&
                  eyeIndex < kVrStereoEyeCount)
@@ -15723,11 +15951,15 @@ bool VR_RenderOpenVrEye(
     }
 
     constexpr float clearColor[4] = {
-        0.03f,
-        0.08f,
-        0.20f,
+        0.0f,
+        0.0f,
+        0.0f,
         1.0f,
     };
+
+    const bool isCutsceneTheater = VR_IsCutsceneTheaterActive();
+    const bool isSpatialEnvironment =
+        isCutsceneTheater || VR_IsSpatial3DMenuActive();
 
     g_vrD3dContext->OMSetRenderTargets(
         1,
@@ -15747,6 +15979,7 @@ bool VR_RenderOpenVrEye(
     viewport.MaxDepth = 1.0f;
 
     if (menuComfortMode &&
+        !isSpatialEnvironment &&
         g_vrCapturedStereoWidth > 0u &&
         g_vrCapturedStereoHeight > 0u)
     {
@@ -15811,17 +16044,21 @@ bool VR_RenderOpenVrEye(
     if (!menuComfortMode &&
         submissionViewsValid)
     {
-        VR_ConfigureHudConvergedCaptureViewport(
-            submissionViews[eyeIndex].fov,
-            eyeTarget.width,
-            eyeTarget.height,
-            &viewport);
+        if (!isSpatialEnvironment)
+        {
+            VR_ConfigureHudConvergedCaptureViewport(
+                submissionViews[eyeIndex].fov,
+                eyeTarget.width,
+                eyeTarget.height,
+                &viewport);
+        }
     }
 
     VR_UpdateCompositorConstantsForEye(
         viewport,
         eyeTarget.width,
-        eyeTarget.height);
+        eyeTarget.height,
+        eyeIndex);
 
     g_vrD3dContext->RSSetViewports(
         1,
@@ -15837,13 +16074,13 @@ bool VR_RenderOpenVrEye(
     ID3D11ShaderResourceView* capturedView =
         g_vrCapturedStereoView.Get();
 
-    const bool isCinematic =
-        clientUIActives[0].connectionState == CA_CINEMATIC;
+    const bool isCinematic = isCutsceneTheater;
 
     bool fsrRendered = false;
 
     if (capturedView != nullptr &&
         !menuComfortMode &&
+        !isSpatialEnvironment &&
         !isCinematic)
     {
         fsrRendered =
@@ -15881,7 +16118,7 @@ bool VR_RenderOpenVrEye(
                 ? g_vrCenteredModalBlitVertexBuffer.Get()
                 : activePauseComfortMode
                     ? g_vrPauseMenuBlitVertexBuffer.Get()
-                    : (menuComfortMode || isCinematic)
+                    : (menuComfortMode || isSpatialEnvironment || isCinematic)
                         ? g_vrMenuBlitVertexBuffer.Get()
                         : g_vrBlitVertexBuffers[eyeIndex]
                               .Get();
@@ -16308,14 +16545,19 @@ bool VR_GetRightControllerWeaponGripWorld(
             return false;
         }
 
+        const float* const sourceGripCameraLocal =
+            g_vrEffectiveWeaponGripPositionValid
+                ? g_vrEffectiveWeaponGripPositionCameraLocal
+                : g_vrRightControllerWeaponPosition;
+
         gripCameraLocal[0] =
-            g_vrRightControllerWeaponPosition[0];
+            sourceGripCameraLocal[0];
 
         gripCameraLocal[1] =
-            g_vrRightControllerWeaponPosition[1];
+            sourceGripCameraLocal[1];
 
         gripCameraLocal[2] =
-            g_vrRightControllerWeaponPosition[2];
+            sourceGripCameraLocal[2];
 
         if (g_vrRightControllerWeaponCalibrationValid)
         {
@@ -16332,6 +16574,59 @@ bool VR_GetRightControllerWeaponGripWorld(
         gripCameraLocal,
         calibrationCameraLocal,
         gripWorld);
+
+    return true;
+}
+
+bool VR_GetRightControllerGripWorld(
+    const float cameraOrigin[3],
+    const float cameraAxis[3][3],
+    float gripWorld[3],
+    float gripAxisWorld[3][3])
+{
+    if (cameraOrigin == nullptr || cameraAxis == nullptr)
+    {
+        return false;
+    }
+
+    float gripLocal[3] = {};
+    float gripAxisLocal[3][3] = {};
+
+    {
+        std::lock_guard<std::mutex> lock(g_vrWeaponControllerPoseMutex);
+        if (!g_vrRightControllerWeaponPoseValid)
+        {
+            return false;
+        }
+
+        std::memcpy(gripLocal, g_vrRightControllerWeaponPosition, sizeof(gripLocal));
+        std::memcpy(gripAxisLocal, g_vrRightControllerGripAxis, sizeof(gripAxisLocal));
+    }
+
+    if (gripWorld != nullptr)
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            gripWorld[i] = cameraOrigin[i] +
+                gripLocal[0] * cameraAxis[0][i] +
+                gripLocal[1] * cameraAxis[1][i] +
+                gripLocal[2] * cameraAxis[2][i];
+        }
+    }
+
+    if (gripAxisWorld != nullptr)
+    {
+        for (int r = 0; r < 3; ++r)
+        {
+            for (int c = 0; c < 3; ++c)
+            {
+                gripAxisWorld[r][c] =
+                    gripAxisLocal[r][0] * cameraAxis[0][c] +
+                    gripAxisLocal[r][1] * cameraAxis[1][c] +
+                    gripAxisLocal[r][2] * cameraAxis[2][c];
+            }
+        }
+    }
 
     return true;
 }
@@ -16842,7 +17137,8 @@ void VR_UpdateManualMagazineReload(
     const float magazineWellOrigin[3],
     const float magazineWellAxis[3][3],
     const float cameraOrigin[3],
-    const float cameraAxis[3][3])
+    const float cameraAxis[3][3],
+    const bool emptyChamber)
 {
     if (magazineWellOrigin == nullptr ||
         magazineWellAxis == nullptr ||
@@ -16875,7 +17171,7 @@ void VR_UpdateManualMagazineReload(
             g_vrHeadOrientationMutex);
 
         ejectButtonHeld =
-            g_vrRightAButtonHeld;
+            g_vrRightBEjectHeld;
     }
 
     const std::uint32_t nowMilliseconds =
@@ -16886,6 +17182,7 @@ void VR_UpdateManualMagazineReload(
     bool logGrabbedLoaded = false;
     bool logPullCanceled = false;
     bool ejectedByPull = false;
+    bool ejectedByKnock = false;
     bool logDrewFresh = false;
     bool logDroppedFresh = false;
     bool logInserted = false;
@@ -16916,6 +17213,9 @@ void VR_UpdateManualMagazineReload(
             g_vrManualMagazineReload.stage =
                 VrManualMagazineReloadStage::Ready;
 
+            g_vrManualMagazineReload.loadedMagazineStillInWeapon =
+                false;
+
             g_vrManualMagazineReload.ejectButtonWasHeld =
                 ejectButtonHeld;
 
@@ -16932,6 +17232,9 @@ void VR_UpdateManualMagazineReload(
                 0u;
 
             g_vrManualMagazineReload.commitUntilMilliseconds =
+                0u;
+
+            g_vrManualMagazineReload.magKnockCooldownUntilMilliseconds =
                 0u;
         }
 
@@ -16983,6 +17286,9 @@ void VR_UpdateManualMagazineReload(
             g_vrManualMagazineReload.stage =
                 VrManualMagazineReloadStage::Ready;
 
+            g_vrManualMagazineReload.loadedMagazineStillInWeapon =
+                false;
+
             g_vrManualMagazineReload.heldNearMagazineWell =
                 false;
 
@@ -16990,15 +17296,34 @@ void VR_UpdateManualMagazineReload(
                 false;
         }
 
+        // Universal B-button magazine eject: works regardless of reloadEjectMode,
+        // both when Ready and when holding a fresh magazine before knocking out the old one.
         if (canReload &&
             ejectButtonPressedEdge &&
-            VR_GetConfiguratorSettings().reloadEjectMode ==
-                VrInteractions::ReloadEjectMode::Button &&
-            g_vrManualMagazineReload.stage ==
-                VrManualMagazineReloadStage::Ready)
+            (g_vrManualMagazineReload.stage ==
+                 VrManualMagazineReloadStage::Ready ||
+             (g_vrManualMagazineReload.stage ==
+                  VrManualMagazineReloadStage::HoldingFresh &&
+              g_vrManualMagazineReload.loadedMagazineStillInWeapon)))
         {
-            g_vrManualMagazineReload.stage =
-                VrManualMagazineReloadStage::Ejected;
+            const bool keepHoldingFresh =
+                g_vrManualMagazineReload.stage ==
+                VrManualMagazineReloadStage::HoldingFresh;
+
+            g_vrManualMagazineReload.loadedMagazineStillInWeapon =
+                false;
+
+            if (!keepHoldingFresh)
+            {
+                g_vrManualMagazineReload.stage =
+                    VrManualMagazineReloadStage::Ejected;
+
+                g_vrManualMagazineReload.heldNearMagazineWell =
+                    false;
+
+                g_vrManualMagazineReload.heldPoseValid =
+                    false;
+            }
 
             g_vrManualMagazineReload.ejectedAtMilliseconds =
                 nowMilliseconds;
@@ -17026,12 +17351,6 @@ void VR_UpdateManualMagazineReload(
                     magazineWellAxis[2][component] *
                         10.0f;
             }
-
-            g_vrManualMagazineReload.heldNearMagazineWell =
-                false;
-
-            g_vrManualMagazineReload.heldPoseValid =
-                false;
 
             g_vrLeftControllerForegripPressed = false;
             g_vrTwoHandWeaponTargetActive = false;
@@ -17122,16 +17441,17 @@ void VR_UpdateManualMagazineReload(
                 loadedMagazineDelta[1] * loadedMagazineDelta[1] +
                 loadedMagazineDelta[2] * loadedMagazineDelta[2]);
 
+        // Method 1: Manually grabbing the loaded clip from the gun
         if (canReload &&
             g_vrManualMagazineReload.stage ==
                 VrManualMagazineReloadStage::Ready &&
-            (ejectButtonPressedEdge ||
-             (configurable.reloadEjectMode == VrInteractions::ReloadEjectMode::Pull && squeezePressedEdge)) &&
+            squeezePressedEdge &&
             g_vrLeftControllerForegripPoseValid &&
-            loadedMagazineDistance <= configurable.reloadInsertRadius * 1.35f)
+            loadedMagazineDistance <= configurable.reloadInsertRadius * 1.45f)
         {
             g_vrManualMagazineReload.stage =
                 VrManualMagazineReloadStage::HoldingLoaded;
+            g_vrManualMagazineReload.loadedMagazineStillInWeapon = false;
             g_vrManualMagazineReload.heldPoseValid = true;
             std::memcpy(
                 g_vrManualMagazineReload.heldOrigin,
@@ -17162,7 +17482,9 @@ void VR_UpdateManualMagazineReload(
             }
 
             if (loadedMagazineDistance >=
-                configurable.reloadPullDistance)
+                configurable.reloadPullDistance ||
+                (squeezeReleasedEdge &&
+                 loadedMagazineDistance >= configurable.reloadPullDistance * 0.50f))
             {
                 g_vrManualMagazineReload.stage =
                     VrManualMagazineReloadStage::Ejected;
@@ -17194,14 +17516,26 @@ void VR_UpdateManualMagazineReload(
             }
         }
 
-        if (g_vrManualMagazineReload.stage ==
-                VrManualMagazineReloadStage::Ejected &&
-            !ejectedByPull &&
+        // Draw a fresh magazine from the pouch either after ejecting OR while the old
+        // magazine is still in the weapon (allowing tactical mag-knock against the loaded clip)
+        if (((g_vrManualMagazineReload.stage ==
+                  VrManualMagazineReloadStage::Ejected &&
+              !ejectedByPull) ||
+             (canReload &&
+              g_vrManualMagazineReload.stage ==
+                  VrManualMagazineReloadStage::Ready)) &&
             squeezePressedEdge &&
             offhandGripAtMagazineHip)
         {
+            const bool oldMagInWeapon =
+                g_vrManualMagazineReload.stage ==
+                VrManualMagazineReloadStage::Ready;
+
             g_vrManualMagazineReload.stage =
                 VrManualMagazineReloadStage::HoldingFresh;
+
+            g_vrManualMagazineReload.loadedMagazineStillInWeapon =
+                oldMagInWeapon;
 
             g_vrManualMagazineReload.heldPoseValid =
                 true;
@@ -17217,6 +17551,9 @@ void VR_UpdateManualMagazineReload(
                 leftGripWorldAxis,
                 sizeof(
                     g_vrManualMagazineReload.heldAxis));
+
+            g_vrLeftControllerForegripPressed = false;
+            g_vrTwoHandWeaponTargetActive = false;
 
             logDrewFresh = true;
         }
@@ -17258,86 +17595,158 @@ void VR_UpdateManualMagazineReload(
             const float insertionRadius =
                 configurable.reloadInsertRadius * 1.5f;
 
-            g_vrManualMagazineReload.heldNearMagazineWell =
-                distanceToMagazineWell <=
-                    insertionRadius;
-
-            if (g_vrManualMagazineReload
-                    .heldNearMagazineWell)
+            // Method 2: Striking a new magazine against the current one to eject/knock it out
+            if (g_vrManualMagazineReload.loadedMagazineStillInWeapon)
             {
-                // Snap only the model's orientation while the controller
-                // remains the positional authority.  This makes insertion
-                // forgiving without teleporting the user's hand.
-                std::memcpy(
-                    g_vrManualMagazineReload.heldAxis,
-                    magazineWellAxis,
-                    sizeof(
-                        g_vrManualMagazineReload.heldAxis));
+                const float knockRadius =
+                    configurable.reloadInsertRadius * 1.65f;
+                if (distanceToMagazineWell <= knockRadius)
+                {
+                    g_vrManualMagazineReload.loadedMagazineStillInWeapon =
+                        false;
+                    g_vrManualMagazineReload.ejectedAtMilliseconds =
+                        nowMilliseconds;
+                    g_vrManualMagazineReload.magKnockCooldownUntilMilliseconds =
+                        nowMilliseconds + 140u;
+
+                    std::memcpy(
+                        g_vrManualMagazineReload.ejectedOrigin,
+                        magazineWellOrigin,
+                        sizeof(g_vrManualMagazineReload.ejectedOrigin));
+                    std::memcpy(
+                        g_vrManualMagazineReload.ejectedAxis,
+                        magazineWellAxis,
+                        sizeof(g_vrManualMagazineReload.ejectedAxis));
+
+                    for (int component = 0; component < 3; ++component)
+                    {
+                        g_vrManualMagazineReload.ejectedVelocity[component] =
+                            magazineWellAxis[0][component] * 14.0f +
+                            magazineWellAxis[1][component] * 7.0f -
+                            magazineWellAxis[2][component] * 12.0f;
+                    }
+
+                    logEjected = true;
+                    ejectedByKnock = true;
+                }
+                else if (squeezeReleasedEdge &&
+                         configurable.objectGripMode !=
+                             VrInteractions::ObjectGripMode::Toggle)
+                {
+                    g_vrManualMagazineReload.stage =
+                        VrManualMagazineReloadStage::Ready;
+                    g_vrManualMagazineReload.loadedMagazineStillInWeapon =
+                        false;
+                    g_vrManualMagazineReload.heldPoseValid =
+                        false;
+                    g_vrManualMagazineReload.heldNearMagazineWell =
+                        false;
+                    logDroppedFresh = true;
+                }
             }
-
-            const bool contactInsertion =
-                configurable.reloadInsertMode ==
-                    VrInteractions::ReloadInsertMode::Contact;
-            if ((contactInsertion &&
-                 g_vrManualMagazineReload.heldNearMagazineWell) ||
-                (squeezeReleasedEdge && g_vrManualMagazineReload.heldNearMagazineWell))
+            else
             {
-                g_vrManualMagazineReload.stage =
-                    VrManualMagazineReloadStage::NeedsBoltRack;
+                g_vrManualMagazineReload.heldNearMagazineWell =
+                    distanceToMagazineWell <=
+                        insertionRadius;
 
-                g_vrManualMagazineReload.heldPoseValid =
-                    false;
+                if (g_vrManualMagazineReload
+                        .heldNearMagazineWell)
+                {
+                    // Snap only the model's orientation while the controller
+                    // remains the positional authority.  This makes insertion
+                    // forgiving without teleporting the user's hand.
+                    std::memcpy(
+                        g_vrManualMagazineReload.heldAxis,
+                        magazineWellAxis,
+                        sizeof(
+                            g_vrManualMagazineReload.heldAxis));
+                }
 
-                g_vrManualMagazineReload
-                    .heldNearMagazineWell = false;
+                const bool knockCooldownDone =
+                    g_vrManualMagazineReload.magKnockCooldownUntilMilliseconds == 0u ||
+                    static_cast<std::int32_t>(
+                        nowMilliseconds -
+                        g_vrManualMagazineReload.magKnockCooldownUntilMilliseconds) >= 0;
 
-                g_vrManualMagazineReload
-                    .boltPullFraction = 0.0f;
+                // Grabbed magazines slot directly into the weapon to register a reload
+                if (knockCooldownDone &&
+                    g_vrManualMagazineReload.heldNearMagazineWell)
+                {
+                    if (emptyChamber)
+                    {
+                        g_vrManualMagazineReload.stage =
+                            VrManualMagazineReloadStage::NeedsBoltRack;
+                        g_vrManualMagazineReload.commitUntilMilliseconds = 0u;
+                        Com_Printf(
+                            0,
+                            "[VR][RELOAD] Magazine inserted on empty chamber! Mandatory action: rack slide / charging handle to chamber round.\n");
+                    }
+                    else
+                    {
+                        g_vrManualMagazineReload.stage =
+                            VrManualMagazineReloadStage::Ready;
+                        g_vrManualMagazineReload.commitUntilMilliseconds =
+                            nowMilliseconds + 450u;
+                    }
 
-                logInserted = true;
-                applyInsertHaptic = true;
-            }
-            else if (squeezeReleasedEdge &&
-                     distanceToMagazineWell > insertionRadius * 2.0f &&
-                     configurable.objectGripMode != VrInteractions::ObjectGripMode::Toggle)
-            {
-                g_vrManualMagazineReload.stage =
-                    VrManualMagazineReloadStage::Ejected;
+                    g_vrManualMagazineReload.loadedMagazineStillInWeapon =
+                        false;
 
-                g_vrManualMagazineReload.heldPoseValid =
-                    false;
+                    g_vrManualMagazineReload.heldPoseValid =
+                        false;
 
-                g_vrManualMagazineReload
-                    .heldNearMagazineWell = false;
+                    g_vrManualMagazineReload
+                        .heldNearMagazineWell = false;
 
-                g_vrManualMagazineReload
-                    .ejectedAtMilliseconds =
-                    nowMilliseconds;
+                    g_vrManualMagazineReload
+                        .boltPullFraction = 0.0f;
 
-                std::memcpy(
-                    g_vrManualMagazineReload.ejectedOrigin,
-                    leftGripWorld,
-                    sizeof(
-                        g_vrManualMagazineReload
-                            .ejectedOrigin));
+                    logInserted = true;
+                    applyInsertHaptic = true;
+                }
+                else if (squeezeReleasedEdge &&
+                         distanceToMagazineWell > insertionRadius * 2.0f &&
+                         configurable.objectGripMode != VrInteractions::ObjectGripMode::Toggle)
+                {
+                    g_vrManualMagazineReload.stage =
+                        VrManualMagazineReloadStage::Ejected;
 
-                std::memcpy(
-                    g_vrManualMagazineReload.ejectedAxis,
-                    leftGripWorldAxis,
-                    sizeof(
-                        g_vrManualMagazineReload
-                            .ejectedAxis));
+                    g_vrManualMagazineReload.heldPoseValid =
+                        false;
 
-                g_vrManualMagazineReload.ejectedVelocity[0] =
-                    0.0f;
+                    g_vrManualMagazineReload
+                        .heldNearMagazineWell = false;
 
-                g_vrManualMagazineReload.ejectedVelocity[1] =
-                    0.0f;
+                    g_vrManualMagazineReload
+                        .ejectedAtMilliseconds =
+                        nowMilliseconds;
 
-                g_vrManualMagazineReload.ejectedVelocity[2] =
-                    -6.0f;
+                    std::memcpy(
+                        g_vrManualMagazineReload.ejectedOrigin,
+                        leftGripWorld,
+                        sizeof(
+                            g_vrManualMagazineReload
+                                .ejectedOrigin));
 
-                logDroppedFresh = true;
+                    std::memcpy(
+                        g_vrManualMagazineReload.ejectedAxis,
+                        leftGripWorldAxis,
+                        sizeof(
+                            g_vrManualMagazineReload
+                                .ejectedAxis));
+
+                    g_vrManualMagazineReload.ejectedVelocity[0] =
+                        0.0f;
+
+                    g_vrManualMagazineReload.ejectedVelocity[1] =
+                        0.0f;
+
+                    g_vrManualMagazineReload.ejectedVelocity[2] =
+                        -6.0f;
+
+                    logDroppedFresh = true;
+                }
             }
         }
 
@@ -17515,14 +17924,16 @@ void VR_UpdateManualMagazineReload(
     {
         Com_Printf(
             0,
-            "[VR][RELOAD] %s weapon %d magazine. Release and grip "
-            "at the configured fresh-magazine hip to draw a new one.\n",
-            ejectedByPull ? "Physically pulled" : "Button-ejected",
+            "[VR][RELOAD] %s weapon %d magazine.\n",
+            ejectedByKnock
+                ? "Mag-knocked"
+                : (ejectedByPull ? "Physically pulled" : "B-button ejected"),
             weaponIndex);
-        if (ejectedByPull)
+        if (ejectedByPull || ejectedByKnock)
         {
-            VR_ApplyOffhandControllerHaptic(0.30f, 0.035f);
+            VR_ApplyOffhandControllerHaptic(0.32f, 0.038f);
         }
+        VR_ApplyRightControllerWeaponHaptic(0.24f, 0.030f);
     }
 
     if (logGrabbedLoaded)
@@ -17553,7 +17964,7 @@ void VR_UpdateManualMagazineReload(
         Com_Printf(
             0,
             "[VR][RELOAD] Drew a fresh weapon %d magazine. "
-            "Release squeeze inside the magazine well.\n",
+            "Slot into the magazine well (or strike the loaded magazine to knock it out).\n",
             weaponIndex);
     }
 
@@ -17569,8 +17980,8 @@ void VR_UpdateManualMagazineReload(
     {
         Com_Printf(
             0,
-            "[VR][RELOAD] Inserted weapon %d magazine; "
-            "rack the charging handle/bolt (or press reload) to chamber.\n",
+            "[VR][RELOAD] Slotted weapon %d magazine into the well; "
+            "committing reload.\n",
             weaponIndex);
     }
 
@@ -17579,6 +17990,9 @@ void VR_UpdateManualMagazineReload(
         VR_ApplyOffhandControllerHaptic(
             0.35f,
             0.045f);
+        VR_ApplyRightControllerWeaponHaptic(
+            0.30f,
+            0.038f);
     }
 }
 
@@ -17628,8 +18042,9 @@ bool VR_GetManualMagazineReloadRenderState(
             VrManualMagazineReloadStage::HoldingLoaded ||
         g_vrManualMagazineReload.stage ==
             VrManualMagazineReloadStage::Ejected ||
-        g_vrManualMagazineReload.stage ==
-            VrManualMagazineReloadStage::HoldingFresh;
+        (g_vrManualMagazineReload.stage ==
+             VrManualMagazineReloadStage::HoldingFresh &&
+         !g_vrManualMagazineReload.loadedMagazineStillInWeapon);
 
     if (g_vrManualMagazineReload.ejectedAtMilliseconds !=
         0u)
@@ -18045,10 +18460,12 @@ static void VR_ComputeBodyRigAnchorsWorld(
         magPouchAxis[1][i] = levelLeft[i];
         magPouchAxis[2][i] = levelUp[i];
 
+        const float fragSide = VrInteractions::FragUsesLeftHip(
+            configurable.dominantHand, configurable.grenadeBeltLayout) ? 1.0f : -1.0f;
         grenadePouchOrigin[i] =
             cameraOrigin[i] +
-            levelForward[i] * (6.2f + configurable.beltForwardOffset) -
-            levelLeft[i] * (weaponSideSign * configurable.beltHipDistance * 0.55f) +
+            levelForward[i] * (6.2f + configurable.beltForwardOffset) +
+            levelLeft[i] * (fragSide * configurable.beltHipDistance * 0.55f) +
             levelUp[i] * (configurable.beltHeight + 2.0f);
         grenadePouchAxis[0][i] = levelForward[i];
         grenadePouchAxis[1][i] = levelLeft[i];
@@ -18108,6 +18525,8 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
     float magPouchAxis[3][3] = {};
     float grenadePouchOrigin[3] = {};
     float grenadePouchAxis[3][3] = {};
+    float tacticalPouchOrigin[3] = {};
+    float tacticalPouchAxis[3][3] = {};
 
     VR_ComputeBodyRigAnchorsWorld(
         cameraOrigin,
@@ -18124,7 +18543,9 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
         magPouchOrigin,
         magPouchAxis,
         grenadePouchOrigin,
-        grenadePouchAxis);
+        grenadePouchAxis,
+        tacticalPouchOrigin,
+        tacticalPouchAxis);
 
     bool hoverRightHaptic = false;
     bool hoverLeftHaptic = false;
@@ -18205,6 +18626,10 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
             g_vrPhysicalBodyRig.initialized = true;
             g_vrPhysicalBodyRig.leftGripWasHeld = leftGripHeld;
             g_vrPhysicalBodyRig.rightGripWasHeld = rightGripHeld;
+            if (g_vrHoldToGripEnabled)
+            {
+                g_vrPhysicalBodyRig.weaponHolstered = !rightGripHeld;
+            }
         }
 
         const bool leftGripPressedEdge =
@@ -18219,29 +18644,84 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
         g_vrPhysicalBodyRig.leftGripWasHeld = leftGripHeld;
         g_vrPhysicalBodyRig.rightGripWasHeld = rightGripHeld;
 
-        constexpr float kHolsterRadiusInches = 9.0f;
-        constexpr float kKnifeSheathRadiusInches = 10.5f;
+        constexpr float kHolsterRadiusInches = 8.5f;
+        constexpr float kKnifeSheathRadiusInches = 4.5f;
+
+        // Grip Conflict Resolution: Strict Proximity & Context-Filtered Prioritization
+        // When hands reach to grip objects, strictly compare distances to all available anchors:
+        // Knife Sheath, Chest Sling, Hip Holster, Mag Pouch, Frag Pouch, Tactical Pouch, and Mag Well.
+        const float distLeftKnife = g_vrLeftControllerForegripPoseValid ? distance3(leftWorld, knifeSheathOrigin) : 9999.0f;
+        const float distLeftChest = g_vrLeftControllerForegripPoseValid ? distance3(leftWorld, chestSlingOrigin) : 9999.0f;
+        const float distLeftHip = g_vrLeftControllerForegripPoseValid ? distance3(leftWorld, hipHolsterOrigin) : 9999.0f;
+        const float distLeftMagPouch = g_vrLeftControllerForegripPoseValid ? distance3(leftWorld, magPouchOrigin) : 9999.0f;
+        const float distLeftGrenade = g_vrLeftControllerForegripPoseValid ? distance3(leftWorld, grenadePouchOrigin) : 9999.0f;
+        const float distLeftTactical = g_vrLeftControllerForegripPoseValid ? distance3(leftWorld, tacticalPouchOrigin) : 9999.0f;
+        const float distLeftMagWell = (g_vrLeftControllerForegripPoseValid && g_vrManualMagazineReload.supported)
+            ? distance3(leftWorld, g_vrManualMagazineReload.magazineWellOrigin) : 9999.0f;
+        const bool leftInteractingWithWeapon = (distLeftMagWell <= 6.5f) || VR_IsSupportGripCandidateLocked();
+
+        const float distRightKnife = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, knifeSheathOrigin) : 9999.0f;
+        const float distRightChest = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, chestSlingOrigin) : 9999.0f;
+        const float distRightHip = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, hipHolsterOrigin) : 9999.0f;
+        const float distRightMagPouch = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, magPouchOrigin) : 9999.0f;
+        const float distRightGrenade = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, grenadePouchOrigin) : 9999.0f;
+        const float distRightTactical = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, tacticalPouchOrigin) : 9999.0f;
 
         const bool rightInHip =
             g_vrRightControllerWeaponPoseValid &&
-            distance3(rightWorld, hipHolsterOrigin) <= kHolsterRadiusInches;
+            distRightHip <= kHolsterRadiusInches &&
+            distRightHip < distRightKnife &&
+            distRightHip <= distRightChest;
         const bool rightInChest =
             g_vrRightControllerWeaponPoseValid &&
-            distance3(rightWorld, chestSlingOrigin) <= kHolsterRadiusInches;
+            distRightChest <= kHolsterRadiusInches &&
+            distRightChest < distRightKnife &&
+            distRightChest < distRightHip;
+        const bool leftInHip =
+            g_vrLeftControllerForegripPoseValid &&
+            distLeftHip <= kHolsterRadiusInches &&
+            distLeftHip < distLeftKnife &&
+            distLeftHip <= distLeftChest &&
+            !leftInteractingWithWeapon;
+        const bool leftInChest =
+            g_vrLeftControllerForegripPoseValid &&
+            distLeftChest <= kHolsterRadiusInches &&
+            distLeftChest < distLeftKnife &&
+            distLeftChest < distLeftHip &&
+            !leftInteractingWithWeapon;
         const bool leftInSheath =
             g_vrLeftControllerForegripPoseValid &&
-            distance3(leftWorld, knifeSheathOrigin) <= kKnifeSheathRadiusInches;
+            distLeftKnife <= kKnifeSheathRadiusInches &&
+            distLeftKnife < distLeftChest &&
+            distLeftKnife < distLeftHip &&
+            distLeftKnife < distLeftMagPouch &&
+            distLeftKnife < distLeftGrenade &&
+            distLeftKnife < distLeftTactical &&
+            !leftInteractingWithWeapon;
         const bool rightInSheath =
             g_vrRightControllerWeaponPoseValid &&
-            distance3(rightWorld, knifeSheathOrigin) <= kKnifeSheathRadiusInches;
+            distRightKnife <= kKnifeSheathRadiusInches &&
+            distRightKnife < distRightChest &&
+            distRightKnife < distRightHip &&
+            distRightKnife < distRightMagPouch &&
+            distRightKnife < distRightGrenade &&
+            distRightKnife < distRightTactical;
 
-        if ((rightInHip && !g_vrPhysicalBodyRig.rightInHipHolster) ||
+        const bool weaponHandHasGrenade =
+            g_vrManualGrenade.stage != VrManualGrenadeStage::Ready &&
+            g_vrManualGrenade.inWeaponHand;
+        const bool offhandHasGrenade =
+            g_vrManualGrenade.stage != VrManualGrenadeStage::Ready &&
+            !g_vrManualGrenade.inWeaponHand;
+
+        if (!weaponHandHasGrenade &&
+            ((rightInHip && !g_vrPhysicalBodyRig.rightInHipHolster) ||
             (rightInChest && !g_vrPhysicalBodyRig.rightInChestSling) ||
-            (rightInSheath && !g_vrPhysicalBodyRig.rightInKnifeSheath))
+            (rightInSheath && !g_vrPhysicalBodyRig.rightInKnifeSheath)))
         {
             hoverRightHaptic = true;
         }
-        if (leftInSheath && !g_vrPhysicalBodyRig.leftInKnifeSheath)
+        if (!offhandHasGrenade && leftInSheath && !g_vrPhysicalBodyRig.leftInKnifeSheath)
         {
             hoverLeftHaptic = true;
         }
@@ -18258,7 +18738,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
                 VrManualMagazineReloadStage::HoldingFresh ||
             g_vrManualMagazineReload.stage ==
                 VrManualMagazineReloadStage::RackingBolt ||
-            g_vrManualGrenade.stage != VrManualGrenadeStage::Ready;
+            offhandHasGrenade;
 
         // 1. Physical Combat Knife Sheath Draw / Stow
         if (!g_vrPhysicalBodyRig.knifeDrawn)
@@ -18278,6 +18758,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
             }
             else if (rightGripPressedEdge &&
                      rightInSheath &&
+                     !weaponHandHasGrenade &&
                      !g_vrRightControllerAttackPressed)
             {
                 g_vrPhysicalBodyRig.knifeDrawn = true;
@@ -18351,19 +18832,29 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
             }
         }
 
-        // 2. Physical Hip Sidearm Holster & Chest/Shoulder Sling Weapon Switch
+        // 2. Physical Hip Sidearm Holster & Chest/Shoulder Sling Weapon Switch (either Grip button)
         const bool switchCooldownElapsed =
             g_vrPhysicalBodyRig.lastWeaponSwitchMilliseconds == 0u ||
             nowMilliseconds -
                 g_vrPhysicalBodyRig.lastWeaponSwitchMilliseconds >= 450u;
-        if (rightGripPressedEdge &&
+        const bool rightHolsterSwitch =
+            rightGripPressedEdge &&
             !rightInSheath &&
+            !weaponHandHasGrenade &&
             (rightInHip || rightInChest) &&
-            !g_vrRightControllerAttackPressed &&
+            !g_vrRightControllerAttackPressed;
+        const bool leftHolsterSwitch =
+            leftGripPressedEdge &&
+            !leftInSheath &&
+            !offhandBusyWithReloadOrGrenade &&
+            (leftInHip || leftInChest);
+        if ((rightHolsterSwitch || leftHolsterSwitch) &&
             switchCooldownElapsed)
         {
+            const bool hipSelected =
+                rightHolsterSwitch ? rightInHip : leftInHip;
             g_vrPhysicalBodyRig.pendingWeaponSwitch = true;
-            g_vrPhysicalBodyRig.pendingWeaponSwitchSlot = rightInHip ? 1 : 2;
+            g_vrPhysicalBodyRig.pendingWeaponSwitchSlot = hipSelected ? 1 : 2;
             g_vrPhysicalBodyRig.lastWeaponSwitchMilliseconds = nowMilliseconds;
             if (g_vrPhysicalBodyRig.knifeDrawn &&
                 g_vrPhysicalBodyRig.knifeInWeaponHand)
@@ -18371,12 +18862,32 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
                 g_vrPhysicalBodyRig.knifeDrawn = false;
                 g_vrPhysicalBodyRig.knifeToggleLatched = false;
             }
-            drawStowRightHaptic = true;
+            if (rightHolsterSwitch)
+                drawStowRightHaptic = true;
+            else
+                drawStowLeftHaptic = true;
             Com_Printf(
                 0,
                 "[VR][HOLSTER] Physical %s holster gripped; switching weapon (target slot %d).\n",
-                rightInHip ? "hip sidearm" : "chest/shoulder sling",
+                hipSelected ? "hip sidearm" : "chest/shoulder sling",
                 g_vrPhysicalBodyRig.pendingWeaponSwitchSlot);
+            g_vrPhysicalBodyRig.weaponHolstered = false;
+        }
+
+        // Holster Tethering / Hold-to-Grip
+        // Releasing the grip button returns the firearm to its holster
+        if (g_vrHoldToGripEnabled &&
+            !g_vrPhysicalBodyRig.knifeDrawn &&
+            !weaponHandHasGrenade &&
+            !rightInSheath)
+        {
+            const bool shouldBeHolstered = !rightGripHeld;
+            if (shouldBeHolstered != g_vrPhysicalBodyRig.weaponHolstered)
+            {
+                g_vrPhysicalBodyRig.weaponHolstered = shouldBeHolstered;
+                drawStowRightHaptic = true;
+                Com_Printf(0, "[VR][HOLSTER] %s\n", shouldBeHolstered ? "Grip released; weapon returned to holster." : "Grip engaged; weapon drawn from holster.");
+            }
         }
 
         // 3. Held Physical Knife Pose & 6DoF Slash/Stab Detection
@@ -18501,6 +19012,117 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
                         0,
                         "[VR][KNIFE] Physical 6DoF knife strike at %.1f in/s.\n",
                         speed);
+                }
+            }
+        }
+
+        // 4. Physical Gun Bashing & Muzzle Strikes (when knife is not drawn)
+        if (!g_vrPhysicalBodyRig.knifeDrawn && g_vrRightControllerWeaponPoseValid)
+        {
+            const float* handVelocity = rightVelocityWorld;
+            const float speed = std::sqrt(
+                handVelocity[0] * handVelocity[0] +
+                handVelocity[1] * handVelocity[1] +
+                handVelocity[2] * handVelocity[2]);
+
+            // Forward speed along weapon barrel / muzzle
+            const float forwardSpeed =
+                handVelocity[0] * rightAxisWorld[0][0] +
+                handVelocity[1] * rightAxisWorld[0][1] +
+                handVelocity[2] * rightAxisWorld[0][2];
+
+            static bool s_weaponBashArmed = true;
+            static std::uint32_t s_lastWeaponBashMs = 0u;
+
+            if (speed <= 26.0f)
+            {
+                s_weaponBashArmed = true;
+            }
+
+            const bool bashCooldownDone = (s_lastWeaponBashMs == 0u || nowMilliseconds - s_lastWeaponBashMs >= 400u);
+
+            if (s_weaponBashArmed && bashCooldownDone && (forwardSpeed >= 48.0f || speed >= 58.0f))
+            {
+                s_weaponBashArmed = false;
+                s_lastWeaponBashMs = nowMilliseconds;
+                g_vrPhysicalBodyRig.knifeStrikeArmed = false;
+                g_vrPhysicalBodyRig.lastKnifeStrikeMilliseconds = nowMilliseconds;
+                g_vrPhysicalBodyRig.knifeStrikePulseUntilMilliseconds = nowMilliseconds + 90u;
+                g_vrPhysicalBodyRig.knifeStrikeValidUntilMilliseconds = nowMilliseconds + 350u;
+
+                for (int c = 0; c < 3; ++c)
+                {
+                    g_vrPhysicalBodyRig.knifeStrikeOriginWorld[c] = rightWorld[c];
+                    g_vrPhysicalBodyRig.knifeStrikeForwardWorld[c] = rightAxisWorld[0][c];
+                    g_vrPhysicalBodyRig.knifeStrikeRightWorld[c] = rightAxisWorld[1][c];
+                    g_vrPhysicalBodyRig.knifeStrikeUpWorld[c] = rightAxisWorld[2][c];
+                }
+
+                strikeRightHaptic = true;
+                Com_Printf(
+                    0,
+                    "[VR][BASH] Physical blunt gun-bash / muzzle strike at %.1f in/s.\n",
+                    speed);
+            }
+        }
+
+        // 5. In-Game T-Pose Calibration Wizard (COD4 MW Briefing Themed)
+        if (g_vrTPoseWizardActive)
+        {
+            if (g_vrTPoseConfirmed)
+            {
+                if (nowMilliseconds - g_vrTPoseConfirmedMs >= 1500u)
+                {
+                    g_vrTPoseWizardActive = false;
+                    g_vrTPoseConfirmed = false;
+                }
+            }
+            else if (g_vrLeftControllerForegripPoseValid && g_vrRightControllerWeaponPoseValid)
+            {
+                const bool triggersOrGripsHeld =
+                    (g_vrLeftControllerSqueezePressedRaw && g_vrRightControllerSqueezePressedRaw) ||
+                    (g_vrRightControllerAttackPressed && g_vrLeftControllerForegripPressed);
+
+                if (triggersOrGripsHeld)
+                {
+                    if (g_vrTPoseHoldStartMs == 0u)
+                    {
+                        g_vrTPoseHoldStartMs = nowMilliseconds;
+                    }
+                    else if (nowMilliseconds - g_vrTPoseHoldStartMs >= 350u)
+                    {
+                        const float span = distance3(leftWorld, rightWorld);
+                        g_vrTPoseTelemetry.wingspanInches = (span > 30.0f && span < 100.0f) ? span : 70.0f;
+                        g_vrTPoseTelemetry.armLengthInches = g_vrTPoseTelemetry.wingspanInches * 0.42f;
+                        g_vrTPoseTelemetry.shoulderWidthInches = g_vrTPoseTelemetry.wingspanInches * 0.26f;
+                        g_vrTPoseTelemetry.standingEyeHeightInches = std::clamp(cameraOrigin[2] - bodyOrigin[2] + 58.0f, 48.0f, 84.0f);
+                        g_vrTPoseTelemetry.shoulderHeightInches = g_vrTPoseTelemetry.standingEyeHeightInches - 7.5f;
+                        g_vrTPoseTelemetry.rigScaleFactor = std::clamp(g_vrTPoseTelemetry.standingEyeHeightInches / 60.0f, 0.75f, 1.35f);
+                        g_vrTPoseTelemetry.valid = true;
+
+                        g_vrTPoseConfirmed = true;
+                        g_vrTPoseConfirmedMs = nowMilliseconds;
+                        drawStowLeftHaptic = true;
+                        drawStowRightHaptic = true;
+
+                        Com_Printf(0,
+                            "[VR][CALIBRATION] // S.A.S. BRIEFING ROOM - SKELETAL RIG SYNCHRONIZED //\n"
+                            "[VR][CALIBRATION] Standing Eye Height: %.1f in\n"
+                            "[VR][CALIBRATION] Physical Wingspan:   %.1f in\n"
+                            "[VR][CALIBRATION] Arm Reach:           %.1f in\n"
+                            "[VR][CALIBRATION] Shoulder Breadth:    %.1f in\n"
+                            "[VR][CALIBRATION] Skeletal Rig Scale:  %.2f\n"
+                            "[VR][CALIBRATION] Telemetry dynamically scaled to body rig, virtual stock, and weapon tracking.\n",
+                            g_vrTPoseTelemetry.standingEyeHeightInches,
+                            g_vrTPoseTelemetry.wingspanInches,
+                            g_vrTPoseTelemetry.armLengthInches,
+                            g_vrTPoseTelemetry.shoulderWidthInches,
+                            g_vrTPoseTelemetry.rigScaleFactor);
+                    }
+                }
+                else
+                {
+                    g_vrTPoseHoldStartMs = 0u;
                 }
             }
         }
@@ -18938,6 +19560,11 @@ static void VR_ResetManualGrenadeInteractionLocked()
         VrManualGrenadeSlot::None;
 
     g_vrManualGrenade.weaponIndex = 0;
+    g_vrManualGrenade.inWeaponHand = false;
+    g_vrManualGrenade.releasePoseValid = false;
+    g_vrManualGrenade.pinPulled = false;
+    g_vrManualGrenade.gripInput.releasePending = false;
+    g_vrManualGrenade.weaponGripInput.releasePending = false;
     g_vrManualGrenade.releasedAtMilliseconds = 0u;
     g_vrManualGrenade.pendingUntilMilliseconds = 0u;
 
@@ -18963,9 +19590,7 @@ static bool VR_ManualMagazineOwnsOrClaimsLeftGripLocked(
     if (!g_vrManualMagazineReload.enabled ||
         !g_vrManualMagazineReload.supported ||
         !g_vrManualMagazineReload.canReload ||
-        !g_vrLeftControllerForegripPoseValid ||
-        VR_GetConfiguratorSettings().reloadEjectMode !=
-            VrInteractions::ReloadEjectMode::Pull)
+        !g_vrLeftControllerForegripPoseValid)
     {
         return false;
     }
@@ -19001,13 +19626,14 @@ static bool VR_ManualMagazineOwnsOrClaimsLeftGripLocked(
             magazineDelta[2] * magazineDelta[2]);
 
     return magazineDistance <=
-        VR_GetConfiguratorSettings().reloadInsertRadius;
+        VR_GetConfiguratorSettings().reloadInsertRadius * 1.45f;
 }
 
 
 bool VR_UpdateManualGrenadeInput(
     const int fragWeaponIndex,
     const int tacticalWeaponIndex,
+    const int commandTime,
     const float cameraOrigin[3],
     const float cameraAxis[3][3],
     bool* manualModeEnabled,
@@ -19034,6 +19660,8 @@ bool VR_UpdateManualGrenadeInput(
     bool logSetting = false;
     bool logGrab = false;
     bool logRelease = false;
+    bool logReturn = false;
+    bool loggedInWeaponHand = false;
     bool logEmptySlot = false;
     bool logPendingTimeout = false;
     bool logMagazinePriority = false;
@@ -19063,12 +19691,17 @@ bool VR_UpdateManualGrenadeInput(
 
         const bool leftSqueezeHeld =
             g_vrLeftControllerSqueezePressedRaw;
+        const bool rightSqueezeHeld = g_vrRightControllerSqueezePressedRaw;
 
         if (!g_vrManualGrenade.enabled)
         {
             VR_ResetManualGrenadeInteractionLocked();
             VrGrenades::ObserveDisabledGrip(&g_vrManualGrenade.gripInput,
                 leftSqueezeHeld, g_vrLeftControllerObjectGripAvailable);
+            VrGrenades::ObserveDisabledGrip(&g_vrManualGrenade.weaponGripInput,
+                rightSqueezeHeld, g_vrRightControllerSqueezeAvailable);
+            g_vrManualGrenade.offhandHover = VrGrenades::Pouch::None;
+            g_vrManualGrenade.weaponHandHover = VrGrenades::Pouch::None;
         }
         else
         {
@@ -19089,7 +19722,14 @@ bool VR_UpdateManualGrenadeInput(
             const VrGrenades::GripUpdate gripUpdate = VrGrenades::UpdateGrip(
                 &g_vrManualGrenade.gripInput, leftSqueezeHeld,
                 g_vrLeftControllerObjectGripAvailable, poseValid,
-                g_vrManualGrenade.stage == VrManualGrenadeStage::Holding,
+                g_vrManualGrenade.stage == VrManualGrenadeStage::Holding &&
+                    !g_vrManualGrenade.inWeaponHand,
+                nowMilliseconds);
+            const VrGrenades::GripUpdate weaponGripUpdate = VrGrenades::UpdateGrip(
+                &g_vrManualGrenade.weaponGripInput, rightSqueezeHeld,
+                g_vrRightControllerSqueezeAvailable, g_vrRightControllerWeaponPoseValid,
+                g_vrManualGrenade.stage == VrManualGrenadeStage::Holding &&
+                    g_vrManualGrenade.inWeaponHand,
                 nowMilliseconds);
 
             float currentOrigin[3] = {};
@@ -19208,15 +19848,6 @@ bool VR_UpdateManualGrenadeInput(
                 }
             }
 
-            const float localForward =
-                g_vrLeftControllerGrenadeBeltPosition[0];
-
-            const float localLeft =
-                g_vrLeftControllerGrenadeBeltPosition[1];
-
-            const float localUp =
-                g_vrLeftControllerGrenadeBeltPosition[2];
-
             const VrConfiguratorSettings& configurable =
                 VR_GetConfiguratorSettings();
 
@@ -19254,24 +19885,6 @@ bool VR_UpdateManualGrenadeInput(
                 tacticalPouchOrigin,
                 tacticalPouchAxis);
 
-            const VrGrenades::BeltSettings beltSettings = {
-                configurable.beltForwardOffset, configurable.beltHeight,
-                configurable.beltHipDistance, configurable.beltGrabRadius};
-            const VrGrenades::BeltZones beltZones = VrGrenades::FindBeltZones(
-                g_vrLeftControllerGrenadeBeltPosition,
-                poseValid && g_vrLeftControllerGrenadeBeltPoseValid,
-                beltSettings);
-            const bool insideLeftHip = beltZones.left;
-            const bool insideRightHip = beltZones.right;
-
-            const auto dist3 = [](const float a[3], const float b[3]) -> float
-            {
-                const float dx = a[0] - b[0];
-                const float dy = a[1] - b[1];
-                const float dz = a[2] - b[2];
-                return std::sqrt(dx * dx + dy * dy + dz * dz);
-            };
-
             float rightWorld[3] = {};
             float rightVelocity[3] = {};
             float rightAxisWorld[3][3] = {};
@@ -19297,58 +19910,29 @@ bool VR_UpdateManualGrenadeInput(
                 }
             }
 
-            constexpr float kTacticalPouchRadius = 9.8f;
-            constexpr float kFragPouchRadius = 9.2f;
+            VrGrenades::Pouch leftPouch = VrGrenades::FindPouch(
+                currentOrigin, poseValid, grenadePouchOrigin, tacticalPouchOrigin);
+            VrGrenades::Pouch rightPouch = VrGrenades::FindPouch(
+                rightWorld, g_vrRightControllerWeaponPoseValid,
+                grenadePouchOrigin, tacticalPouchOrigin);
 
-            const bool leftNearTactical =
-                poseValid &&
-                dist3(currentOrigin, tacticalPouchOrigin) <= kTacticalPouchRadius;
-            const bool rightNearTactical =
-                g_vrRightControllerWeaponPoseValid &&
-                dist3(rightWorld, tacticalPouchOrigin) <= kTacticalPouchRadius;
-
-            const bool leftNearFrag =
-                (poseValid && dist3(currentOrigin, grenadePouchOrigin) <= kFragPouchRadius) ||
-                insideLeftHip;
-            const bool rightNearFrag =
-                g_vrRightControllerWeaponPoseValid &&
-                dist3(rightWorld, grenadePouchOrigin) <= kFragPouchRadius;
-
-            // Hover haptics for intuitive proximity cueing
-            static bool s_lastLeftNearTac = false;
-            static bool s_lastRightNearTac = false;
-            static bool s_lastLeftNearFrag = false;
-            static bool s_lastRightNearFrag = false;
-
-            if (leftNearTactical && !s_lastLeftNearTac)
+            // Resolve overlapping chest/hip volumes by the nearest visible
+            // prop. Gripping the sling or knife must remain possible even
+            // when those anchors also lie within the tactical pouch radius.
+            const auto reserveCloserAnchor = [&](VrGrenades::Pouch& pouch,
+                const float hand[3], const float anchor[3], const float radius)
             {
-                VR_ApplyOffhandControllerHaptic(0.22f, 0.025f);
-            }
-            if (rightNearTactical && !s_lastRightNearTac)
-            {
-                VR_ApplyRightControllerWeaponHaptic(0.22f, 0.025f);
-            }
-            if (leftNearFrag && !s_lastLeftNearFrag)
-            {
-                VR_ApplyOffhandControllerHaptic(0.22f, 0.025f);
-            }
-            if (rightNearFrag && !s_lastRightNearFrag)
-            {
-                VR_ApplyRightControllerWeaponHaptic(0.22f, 0.025f);
-            }
-
-            s_lastLeftNearTac = leftNearTactical;
-            s_lastRightNearTac = rightNearTactical;
-            s_lastLeftNearFrag = leftNearFrag;
-            s_lastRightNearFrag = rightNearFrag;
-
-            const bool rightSqueezeHeld = g_vrRightControllerSqueezePressedRaw;
-            static bool s_rightSqueezeWasHeld = false;
-            const bool rightGripPressed =
-                rightSqueezeHeld && !s_rightSqueezeWasHeld;
-            s_rightSqueezeWasHeld = rightSqueezeHeld;
-
-            static uint32_t s_rightReleasePendingMs = 0u;
+                const float* pouchOrigin = pouch == VrGrenades::Pouch::Tactical
+                    ? tacticalPouchOrigin : grenadePouchOrigin;
+                const float distance = VrGrenades::DistanceSquared(hand, anchor);
+                if (distance <= radius * radius &&
+                    distance <= VrGrenades::DistanceSquared(hand, pouchOrigin))
+                    pouch = VrGrenades::Pouch::None;
+            };
+            reserveCloserAnchor(leftPouch, currentOrigin, knifeSheathOrigin, 4.5f);
+            reserveCloserAnchor(rightPouch, rightWorld, knifeSheathOrigin, 4.5f);
+            reserveCloserAnchor(rightPouch, rightWorld, hipHolsterOrigin, 8.5f);
+            reserveCloserAnchor(rightPouch, rightWorld, chestSlingOrigin, 8.5f);
 
             const bool magazineOwnsLeftGrip =
                 VR_ManualMagazineOwnsOrClaimsLeftGripLocked(
@@ -19359,11 +19943,36 @@ bool VR_UpdateManualGrenadeInput(
                 g_vrLeftControllerForegripPressed &&
                 VR_IsSupportGripCandidateLocked();
 
+            const bool leftNearTactical = leftPouch == VrGrenades::Pouch::Tactical;
+            const bool leftNearFrag = leftPouch == VrGrenades::Pouch::Frag;
+            const bool rightNearTactical = rightPouch == VrGrenades::Pouch::Tactical;
+            const bool rightNearFrag = rightPouch == VrGrenades::Pouch::Frag;
+            const bool rightGripPressed = weaponGripUpdate.grabPressed;
+            const bool leftKnifeHeld = g_vrPhysicalBodyRig.knifeDrawn &&
+                !g_vrPhysicalBodyRig.knifeInWeaponHand;
+            const bool rightKnifeHeld = g_vrPhysicalBodyRig.knifeDrawn &&
+                g_vrPhysicalBodyRig.knifeInWeaponHand;
+
+            if (g_vrManualGrenade.stage != VrManualGrenadeStage::Ready)
+                leftPouch = rightPouch = VrGrenades::Pouch::None;
+            if (magazineOwnsLeftGrip || supportGripCandidate || leftKnifeHeld)
+                leftPouch = VrGrenades::Pouch::None;
+            if (rightKnifeHeld || g_vrRightControllerAttackPressed)
+                rightPouch = VrGrenades::Pouch::None;
+            if (leftPouch != VrGrenades::Pouch::None &&
+                leftPouch != g_vrManualGrenade.offhandHover)
+                VR_ApplyOffhandControllerHaptic(0.22f, 0.025f);
+            if (rightPouch != VrGrenades::Pouch::None &&
+                rightPouch != g_vrManualGrenade.weaponHandHover)
+                VR_ApplyRightControllerWeaponHaptic(0.22f, 0.025f);
+            g_vrManualGrenade.offhandHover = leftPouch;
+            g_vrManualGrenade.weaponHandHover = rightPouch;
+
             const bool beltGrabPressed =
                 g_vrManualGrenade.stage ==
                     VrManualGrenadeStage::Ready &&
                 gripUpdate.grabPressed &&
-                (insideLeftHip || insideRightHip || leftNearFrag || leftNearTactical);
+                (leftNearFrag || leftNearTactical);
 
             if (beltGrabPressed &&
                 (magazineOwnsLeftGrip ||
@@ -19386,7 +19995,7 @@ bool VR_UpdateManualGrenadeInput(
                 if (leftNearTactical &&
                     gripUpdate.grabPressed &&
                     !magazineOwnsLeftGrip &&
-                    !supportGripCandidate)
+                    !supportGripCandidate && !leftKnifeHeld)
                 {
                     selectedSlot = VrManualGrenadeSlot::Tactical;
                     selectedWeaponIndex = tacticalWeaponIndex;
@@ -19394,7 +20003,7 @@ bool VR_UpdateManualGrenadeInput(
                 }
                 else if (rightNearTactical &&
                          rightGripPressed &&
-                         !g_vrPhysicalBodyRig.knifeDrawn)
+                         !rightKnifeHeld && !g_vrRightControllerAttackPressed)
                 {
                     selectedSlot = VrManualGrenadeSlot::Tactical;
                     selectedWeaponIndex = tacticalWeaponIndex;
@@ -19404,7 +20013,7 @@ bool VR_UpdateManualGrenadeInput(
                 else if (leftNearFrag &&
                          gripUpdate.grabPressed &&
                          !magazineOwnsLeftGrip &&
-                         !supportGripCandidate)
+                         !supportGripCandidate && !leftKnifeHeld)
                 {
                     selectedSlot = VrManualGrenadeSlot::Frag;
                     selectedWeaponIndex = fragWeaponIndex;
@@ -19412,7 +20021,7 @@ bool VR_UpdateManualGrenadeInput(
                 }
                 else if (rightNearFrag &&
                          rightGripPressed &&
-                         !g_vrPhysicalBodyRig.knifeDrawn)
+                         !rightKnifeHeld && !g_vrRightControllerAttackPressed)
                 {
                     selectedSlot = VrManualGrenadeSlot::Frag;
                     selectedWeaponIndex = fragWeaponIndex;
@@ -19423,9 +20032,10 @@ bool VR_UpdateManualGrenadeInput(
                 {
                     loggedSlot = selectedSlot;
                     loggedWeaponIndex = selectedWeaponIndex;
-                    loggedLocalPosition[0] = localForward;
-                    loggedLocalPosition[1] = localLeft;
-                    loggedLocalPosition[2] = localUp;
+                    loggedInWeaponHand = grabByRightHand;
+                    loggedUsedPalmPose = !grabByRightHand && currentOriginUsesPalmPose;
+                    std::memcpy(loggedLocalPosition, grabByRightHand ? rightWorld : currentOrigin,
+                        sizeof(loggedLocalPosition));
 
                     if (selectedWeaponIndex > 0)
                     {
@@ -19439,7 +20049,15 @@ bool VR_UpdateManualGrenadeInput(
                             grabByRightHand;
                         g_vrManualGrenade.weaponIndex =
                             selectedWeaponIndex;
-                        s_rightReleasePendingMs = 0u;
+                        g_vrManualGrenade.releasePoseValid = false;
+                        for (auto& request : g_vrManualGrenade.returns)
+                        {
+                            if (request.weaponIndex != 0 && !request.closed)
+                            {
+                                request.closed = true;
+                                request.nextGrabCommandTime = static_cast<std::uint32_t>(commandTime);
+                            }
+                        }
 
                         if (grabByRightHand)
                         {
@@ -19451,7 +20069,6 @@ bool VR_UpdateManualGrenadeInput(
                                 g_vrManualGrenade.heldAxis,
                                 rightAxisWorld,
                                 sizeof(g_vrManualGrenade.heldAxis));
-                            VR_ApplyRightControllerWeaponHaptic(0.48f, 0.055f);
                             Com_Printf(
                                 0,
                                 "[VR][GRENADE] Weapon hand grabbed %s (slot %d) from %s.\n",
@@ -19469,7 +20086,6 @@ bool VR_UpdateManualGrenadeInput(
                                 g_vrManualGrenade.heldAxis,
                                 currentAxis,
                                 sizeof(g_vrManualGrenade.heldAxis));
-                            VR_ApplyOffhandControllerHaptic(0.48f, 0.055f);
                             g_vrLeftControllerForegripPressed = false;
                             g_vrTwoHandWeaponTargetActive = false;
                             Com_Printf(
@@ -19500,7 +20116,12 @@ bool VR_UpdateManualGrenadeInput(
             if (g_vrManualGrenade.stage ==
                 VrManualGrenadeStage::Holding)
             {
-                bool triggerRelease = false;
+                const VrGrenades::GripUpdate& activeGripUpdate =
+                    g_vrManualGrenade.inWeaponHand ? weaponGripUpdate : gripUpdate;
+                const VrGrenades::GripState& activeGrip = g_vrManualGrenade.inWeaponHand
+                    ? g_vrManualGrenade.weaponGripInput : g_vrManualGrenade.gripInput;
+                const bool activePoseValid = g_vrManualGrenade.inWeaponHand
+                    ? g_vrRightControllerWeaponPoseValid : poseValid;
 
                 if (g_vrManualGrenade.inWeaponHand)
                 {
@@ -19523,23 +20144,6 @@ bool VR_UpdateManualGrenadeInput(
                         }
                     }
 
-                    // 120ms stickiness threshold debounce for right hand
-                    if (!rightSqueezeHeld)
-                    {
-                        if (s_rightReleasePendingMs == 0u)
-                        {
-                            s_rightReleasePendingMs = nowMilliseconds + 120u;
-                        }
-                        else if (nowMilliseconds >= s_rightReleasePendingMs)
-                        {
-                            triggerRelease = true;
-                            s_rightReleasePendingMs = 0u;
-                        }
-                    }
-                    else
-                    {
-                        s_rightReleasePendingMs = 0u;
-                    }
                 }
                 else
                 {
@@ -19562,76 +20166,80 @@ bool VR_UpdateManualGrenadeInput(
                         }
                     }
 
-                    triggerRelease = gripUpdate.release;
                 }
 
-                if (triggerRelease)
+                // Physical Grenade Pin Pull Detection
+                const float* otherHandOrigin = g_vrManualGrenade.inWeaponHand ? currentOrigin : rightWorld;
+                const bool otherHandValid = g_vrManualGrenade.inWeaponHand ? poseValid : g_vrRightControllerWeaponPoseValid;
+                const bool otherHandTriggerOrGrip = g_vrManualGrenade.inWeaponHand
+                    ? (g_vrLeftControllerSqueezePressedRaw || g_vrLeftControllerForegripPressed)
+                    : (g_vrRightControllerSqueezePressedRaw || g_vrRightControllerAttackPressed);
+                if (!g_vrManualGrenade.pinPulled && otherHandValid && otherHandTriggerOrGrip)
                 {
-                    const float distToTactical =
-                        dist3(g_vrManualGrenade.heldOrigin, tacticalPouchOrigin);
-                    const float distToFrag =
-                        dist3(g_vrManualGrenade.heldOrigin, grenadePouchOrigin);
-
-                    // Check proximity return: cancel throw and stow item back into pouch
-                    if (g_vrManualGrenade.slot == VrManualGrenadeSlot::Tactical &&
-                        distToTactical <= 8.8f)
+                    const float dOther = VR_Distance3(otherHandOrigin, g_vrManualGrenade.heldOrigin);
+                    if (dOther <= 6.0f)
                     {
-                        VR_ResetManualGrenadeInteractionLocked();
-                        if (g_vrManualGrenade.inWeaponHand)
-                        {
-                            VR_ApplyRightControllerWeaponHaptic(0.24f, 0.035f);
-                        }
-                        else
-                        {
-                            VR_ApplyOffhandControllerHaptic(0.24f, 0.035f);
-                        }
-                        Com_Printf(
-                            0,
-                            "[VR][GRENADE] Released within chest tactical pouch radius; returned flashbang to vest.\n");
+                        g_vrManualGrenade.pinPulled = true;
+                        VR_ApplyOffhandControllerHaptic(0.40f, 0.050f);
+                        VR_ApplyRightControllerWeaponHaptic(0.40f, 0.050f);
+                        Com_Printf(0, "[VR][GRENADE] Physical pin pulled with offhand! Spoon released, fuse live.\n");
                     }
-                    else if (g_vrManualGrenade.slot == VrManualGrenadeSlot::Frag &&
-                             (distToFrag <= 8.8f || insideLeftHip || insideRightHip))
+                }
+
+                // Snapshot the physical release edge, before the debounce
+                // window can replace a throw's velocity with follow-through.
+                if (activeGripUpdate.releaseStarted)
+                {
+                    std::memcpy(g_vrManualGrenade.releaseOrigin,
+                        g_vrManualGrenade.heldOrigin, sizeof(g_vrManualGrenade.releaseOrigin));
+                    g_vrManualGrenade.releasePoseValid = activePoseValid;
+                    VR_SelectManualGrenadeReleaseVelocityLocked(nowMilliseconds,
+                        g_vrManualGrenade.releaseVelocity,
+                        &g_vrManualGrenade.releaseVelocitySampleAgeMilliseconds);
+                    std::memcpy(g_vrManualGrenade.releaseFallbackForward,
+                        cameraAxis[0], sizeof(g_vrManualGrenade.releaseFallbackForward));
+                }
+                if ((activeGrip.releasePending || activeGripUpdate.release) &&
+                    !g_vrManualGrenade.releasePoseValid && activePoseValid)
+                {
+                    std::memcpy(g_vrManualGrenade.releaseOrigin,
+                        g_vrManualGrenade.heldOrigin, sizeof(g_vrManualGrenade.releaseOrigin));
+                    g_vrManualGrenade.releasePoseValid = true;
+                }
+
+                if (activeGripUpdate.release)
+                {
+                    loggedInWeaponHand = g_vrManualGrenade.inWeaponHand;
+                    loggedSlot = g_vrManualGrenade.slot;
+                    loggedWeaponIndex = g_vrManualGrenade.weaponIndex;
+                    const float* returnPouch = g_vrManualGrenade.slot == VrManualGrenadeSlot::Tactical
+                        ? tacticalPouchOrigin : grenadePouchOrigin;
+                    const bool returnRequested = VrGrenades::CanReturnToPouch(g_vrManualGrenade.releaseOrigin,
+                        g_vrManualGrenade.releasePoseValid, returnPouch);
+                    if (returnRequested || !g_vrManualGrenade.pinPulled)
                     {
+                        auto& request = g_vrManualGrenade.returns[g_vrManualGrenade.returnWriteIndex];
+                        request = {};
+                        request.weaponIndex = g_vrManualGrenade.weaponIndex;
+                        request.firstCommandTime = static_cast<std::uint32_t>(commandTime);
+                        g_vrManualGrenade.returnWriteIndex = (g_vrManualGrenade.returnWriteIndex + 1u) %
+                            g_vrManualGrenade.returns.size();
+                        const bool unpinnedReturn = !g_vrManualGrenade.pinPulled && !returnRequested;
                         VR_ResetManualGrenadeInteractionLocked();
-                        if (g_vrManualGrenade.inWeaponHand)
+                        g_vrManualGrenade.viewOverrideUntilMilliseconds = nowMilliseconds + 500u;
+                        logReturn = true;
+                        if (unpinnedReturn)
                         {
-                            VR_ApplyRightControllerWeaponHaptic(0.24f, 0.035f);
+                            Com_Printf(0, "[VR][GRENADE] Released without pulling pin; grenade returned safely to pouch.\n");
                         }
-                        else
-                        {
-                            VR_ApplyOffhandControllerHaptic(0.24f, 0.035f);
-                        }
-                        Com_Printf(
-                            0,
-                            "[VR][GRENADE] Released within belt pouch radius; returned frag grenade to pouch.\n");
                     }
                     else
                     {
-                        // Commit the throw!
-                        std::memcpy(
-                            g_vrManualGrenade.releaseOrigin,
-                            g_vrManualGrenade.heldOrigin,
-                            sizeof(g_vrManualGrenade.releaseOrigin));
-
-                        if (!VR_SelectManualGrenadeReleaseVelocityLocked(
-                                nowMilliseconds,
-                                g_vrManualGrenade.releaseVelocity,
-                                &g_vrManualGrenade.releaseVelocitySampleAgeMilliseconds))
-                        {
-                            g_vrManualGrenade.releaseVelocity[0] = 0.0f;
-                            g_vrManualGrenade.releaseVelocity[1] = 0.0f;
-                            g_vrManualGrenade.releaseVelocity[2] = 0.0f;
-                        }
-
-                        std::memcpy(
-                            g_vrManualGrenade.releaseFallbackForward,
-                            cameraAxis[0],
-                            sizeof(g_vrManualGrenade.releaseFallbackForward));
 
                         g_vrManualGrenade.stage =
                             VrManualGrenadeStage::ReleasedPending;
                         g_vrManualGrenade.releasedAtMilliseconds =
-                            nowMilliseconds;
+                            activeGrip.releasedAt;
                         g_vrManualGrenade.pendingUntilMilliseconds =
                             nowMilliseconds + 3000u;
                         g_vrManualGrenade.viewOverrideUntilMilliseconds =
@@ -19651,7 +20259,7 @@ bool VR_UpdateManualGrenadeInput(
                         loggedSlot = g_vrManualGrenade.slot;
                         loggedWeaponIndex = g_vrManualGrenade.weaponIndex;
                         logRelease = true;
-                        loggedReleasePoseFallback = gripUpdate.lastValidPoseFallback;
+                        loggedReleasePoseFallback = activeGripUpdate.lastValidPoseFallback;
 
                         Com_Printf(
                             0,
@@ -19673,7 +20281,8 @@ bool VR_UpdateManualGrenadeInput(
                     *tacticalHeld = true;
                 }
 
-                if (!g_vrManualGrenade.inWeaponHand)
+                if (g_vrManualGrenade.stage != VrManualGrenadeStage::Ready &&
+                    !g_vrManualGrenade.inWeaponHand)
                 {
                     g_vrLeftControllerForegripPressed = false;
                     g_vrTwoHandWeaponTargetActive = false;
@@ -19696,8 +20305,8 @@ bool VR_UpdateManualGrenadeInput(
     {
         Com_Printf(
             0,
-            "[VR][GRENADE] beta.13 handed manual hip grenades are %s. "
-            "Belt layout %s; release/toggle the off-hand grip to throw.\n",
+            "[VR][GRENADE] Manual belt frag / chest tactical grenades are %s. "
+            "Belt layout %s; release the holding hand's grip to throw.\n",
             *manualModeEnabled
                 ? "enabled"
                 : "disabled",
@@ -19722,13 +20331,15 @@ bool VR_UpdateManualGrenadeInput(
         loggedSlot == VrManualGrenadeSlot::Frag
             ? "frag"
             : "tactical";
+    const auto applyHoldingHandHaptic = loggedInWeaponHand
+        ? VR_ApplyRightControllerWeaponHaptic : VR_ApplyOffhandControllerHaptic;
 
     if (logGrab)
     {
         Com_Printf(
             0,
-            "[VR][GRENADE] Grabbed %s hip weapon %d at "
-            "level-belt-local %.2f %.2f %.2f; held-model anchor %s.\n",
+            "[VR][GRENADE] Grabbed %s pouch weapon %d at "
+            "world %.2f %.2f %.2f; held-model anchor %s.\n",
             loggedSlotName,
             loggedWeaponIndex,
             loggedLocalPosition[0],
@@ -19737,14 +20348,14 @@ bool VR_UpdateManualGrenadeInput(
             loggedUsedPalmPose
                 ? "palm_ext/pose"
                 : "grip/pose fallback");
-        VR_ApplyOffhandControllerHaptic(0.22f, 0.030f);
+        applyHoldingHandHaptic(0.48f, 0.055f);
     }
 
     if (logEmptySlot)
     {
         Com_Printf(
             0,
-            "[VR][GRENADE] %s hip grab had no available "
+            "[VR][GRENADE] %s pouch grab had no available "
             "grenade; pulsed COD4's native empty hint.\n",
             loggedSlotName);
     }
@@ -19775,7 +20386,14 @@ bool VR_UpdateManualGrenadeInput(
             loggedReleaseVelocity[2],
             releaseSpeed,
             loggedVelocitySampleAgeMilliseconds);
-        VR_ApplyOffhandControllerHaptic(0.16f, 0.020f);
+        applyHoldingHandHaptic(0.16f, 0.020f);
+    }
+
+    if (logReturn)
+    {
+        Com_Printf(0, "[VR][GRENADE] Returned %s weapon %d to its pouch with the %s; native throw cancelled.\n",
+            loggedSlotName, loggedWeaponIndex, loggedInWeaponHand ? "weapon hand" : "off hand");
+        applyHoldingHandHaptic(0.24f, 0.035f);
     }
 
     if (logPendingTimeout)
@@ -19863,6 +20481,15 @@ bool VR_IsManualGrenadeViewOverrideActive()
          recoveryWindowActive);
 }
 
+
+bool VR_IsManualGrenadeReturnPending(const int weaponIndex, const int commandTime)
+{
+    std::lock_guard<std::mutex> lock(g_vrWeaponControllerPoseMutex);
+    for (const auto& request : g_vrManualGrenade.returns)
+        if (request.Matches(weaponIndex, static_cast<std::uint32_t>(commandTime)))
+            return true;
+    return false;
+}
 
 bool VR_IsManualGrenadeReleasePending(
     const int weaponIndex)
@@ -20269,10 +20896,15 @@ bool VR_ApplyRightControllerToWeaponPlacement(
     bool attachmentValid = false;
 
     float leftForegripPosition[3] = {};
+    float leftForegripAxis[3][3] = {};
+    bool rightSqueezeHeld = false;
     float twoHandBlend = 0.0f;
     bool twoHandTargetActive = false;
     float twoHandAnchorTargetAxis[3][3] = {};
     float twoHandAnchorControllerAxis[3][3] = {};
+    float twoHandAnchorLeftPos[3] = {};
+    float twoHandAnchorRightPos[3] = {};
+    float twoHandAnchorLeftAxis[3][3] = {};
     std::string safeWeaponId = VrWeaponProfiles::NormalizeId(
         weaponId != nullptr ? weaponId : "");
     if (!VrWeaponProfiles::IsSafeId(safeWeaponId))
@@ -20304,6 +20936,14 @@ bool VR_ApplyRightControllerToWeaponPlacement(
             g_vrLeftControllerForegripPosition,
             sizeof(leftForegripPosition));
 
+        memcpy(
+            leftForegripAxis,
+            g_vrLeftControllerForegripAxis,
+            sizeof(leftForegripAxis));
+
+        rightSqueezeHeld =
+            g_vrRightControllerSqueezePressedRaw;
+
         twoHandBlend =
             g_vrTwoHandWeaponBlend;
 
@@ -20317,6 +20957,7 @@ bool VR_ApplyRightControllerToWeaponPlacement(
             g_vrTwoHandWeaponAnchorWeaponIndex = 0;
             g_vrTwoHandWeaponLastActiveFrameValid = false;
             g_vrTwoHandWeaponLastActiveWeaponIndex = 0;
+            g_vrEffectiveWeaponGripPositionValid = false;
         }
 
         VrWeaponAttachmentBaseline& baseline =
@@ -20599,6 +21240,18 @@ bool VR_ApplyRightControllerToWeaponPlacement(
                         g_vrTwoHandWeaponAnchorControllerAxis,
                         currentAxis,
                         sizeof(g_vrTwoHandWeaponAnchorControllerAxis));
+                    std::memcpy(
+                        g_vrTwoHandWeaponAnchorLeftPosition,
+                        leftForegripPosition,
+                        sizeof(g_vrTwoHandWeaponAnchorLeftPosition));
+                    std::memcpy(
+                        g_vrTwoHandWeaponAnchorRightPosition,
+                        currentPosition,
+                        sizeof(g_vrTwoHandWeaponAnchorRightPosition));
+                    std::memcpy(
+                        g_vrTwoHandWeaponAnchorLeftAxis,
+                        leftForegripAxis,
+                        sizeof(g_vrTwoHandWeaponAnchorLeftAxis));
                     g_vrTwoHandWeaponAnchorWeaponIndex = weaponIndex;
                     g_vrTwoHandWeaponAnchorValid = true;
                     g_vrTwoHandWeaponAnchorCaptureRequested = false;
@@ -20641,20 +21294,127 @@ bool VR_ApplyRightControllerToWeaponPlacement(
                     twoHandAnchorControllerAxis,
                     g_vrTwoHandWeaponAnchorControllerAxis,
                     sizeof(twoHandAnchorControllerAxis));
+                std::memcpy(
+                    twoHandAnchorLeftPos,
+                    g_vrTwoHandWeaponAnchorLeftPosition,
+                    sizeof(twoHandAnchorLeftPos));
+                std::memcpy(
+                    twoHandAnchorRightPos,
+                    g_vrTwoHandWeaponAnchorRightPosition,
+                    sizeof(twoHandAnchorRightPos));
+                std::memcpy(
+                    twoHandAnchorLeftAxis,
+                    g_vrTwoHandWeaponAnchorLeftAxis,
+                    sizeof(twoHandAnchorLeftAxis));
                 anchorReady = true;
             }
         }
 
         if (targetFrameReady && anchorReady)
         {
+            // Front-hand weapon support & manipulation:
+            // Allow players to support or manipulate the weapon using only the front hand
+            // (when the rear grip button is not held, or when pushing/pulling with the front hand).
+            const float anchorBaseline[3] = {
+                twoHandAnchorLeftPos[0] - twoHandAnchorRightPos[0],
+                twoHandAnchorLeftPos[1] - twoHandAnchorRightPos[1],
+                twoHandAnchorLeftPos[2] - twoHandAnchorRightPos[2],
+            };
+            const float currentBaseline[3] = {
+                leftForegripPosition[0] - currentPosition[0],
+                leftForegripPosition[1] - currentPosition[1],
+                leftForegripPosition[2] - currentPosition[2],
+            };
+            const float anchorDist = std::sqrt(
+                anchorBaseline[0] * anchorBaseline[0] +
+                anchorBaseline[1] * anchorBaseline[1] +
+                anchorBaseline[2] * anchorBaseline[2]);
+            const float currentDist = std::sqrt(
+                currentBaseline[0] * currentBaseline[0] +
+                currentBaseline[1] * currentBaseline[1] +
+                currentBaseline[2] * currentBaseline[2]);
+
             float targetTwoHandWeaponAxis[3][3] = {};
-            kisak::vr::weapon_calibration::RelativeTwoHandWeaponAxis(
-                twoHandAnchorTargetAxis,
-                twoHandAnchorControllerAxis,
-                relativeControllerAxis,
-                calibratedOneHandWeaponAxis,
-                currentTwoHandTargetAxis,
-                targetTwoHandWeaponAxis);
+            if (!rightSqueezeHeld && twoHandTargetActive)
+            {
+                // Front-hand-only manipulation: translate weapon with the front hand
+                // and steer orientation from the front hand's relative rotation.
+                float anchorLeftTranspose[3][3] = {};
+                kisak::vr::weapon_calibration::TransposeAxis(
+                    twoHandAnchorLeftAxis,
+                    anchorLeftTranspose);
+                float leftDeltaRotation[3][3] = {};
+                kisak::vr::weapon_calibration::MultiplyAxes(
+                    anchorLeftTranspose,
+                    leftForegripAxis,
+                    leftDeltaRotation);
+                float frontManipulatedControllerAxis[3][3] = {};
+                kisak::vr::weapon_calibration::MultiplyAxes(
+                    twoHandAnchorControllerAxis,
+                    leftDeltaRotation,
+                    frontManipulatedControllerAxis);
+                float frontManipulatedWeaponAxis[3][3] = {};
+                kisak::vr::weapon_calibration::MultiplyAxes(
+                    attachmentAxis,
+                    frontManipulatedControllerAxis,
+                    frontManipulatedWeaponAxis);
+
+                float pairSteeredWeaponAxis[3][3] = {};
+                kisak::vr::weapon_calibration::RelativeTwoHandWeaponAxis(
+                    twoHandAnchorTargetAxis,
+                    twoHandAnchorControllerAxis,
+                    relativeControllerAxis,
+                    calibratedOneHandWeaponAxis,
+                    currentTwoHandTargetAxis,
+                    pairSteeredWeaponAxis);
+
+                if (!kisak::vr::weapon_calibration::BlendWeaponAxes(
+                        pairSteeredWeaponAxis,
+                        frontManipulatedWeaponAxis,
+                        0.65f,
+                        targetTwoHandWeaponAxis))
+                {
+                    std::memcpy(
+                        targetTwoHandWeaponAxis,
+                        pairSteeredWeaponAxis,
+                        sizeof(targetTwoHandWeaponAxis));
+                }
+
+                for (int c = 0; c < 3; ++c)
+                {
+                    const float rotatedBaseline =
+                        anchorBaseline[0] * leftDeltaRotation[0][c] +
+                        anchorBaseline[1] * leftDeltaRotation[1][c] +
+                        anchorBaseline[2] * leftDeltaRotation[2][c];
+                    const float frontDrivenRightPos =
+                        leftForegripPosition[c] - rotatedBaseline;
+                    currentPosition[c] +=
+                        (frontDrivenRightPos - currentPosition[c]) * twoHandBlend;
+                }
+            }
+            else
+            {
+                kisak::vr::weapon_calibration::RelativeTwoHandWeaponAxis(
+                    twoHandAnchorTargetAxis,
+                    twoHandAnchorControllerAxis,
+                    relativeControllerAxis,
+                    calibratedOneHandWeaponAxis,
+                    currentTwoHandTargetAxis,
+                    targetTwoHandWeaponAxis);
+
+                if (twoHandTargetActive &&
+                    std::abs(currentDist - anchorDist) > 0.75f &&
+                    currentDist > 1.0e-3f)
+                {
+                    const float stretchDelta = currentDist - anchorDist;
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        currentPosition[c] +=
+                            (currentBaseline[c] / currentDist) *
+                            stretchDelta * 0.55f * twoHandBlend;
+                    }
+                }
+            }
 
             float blendedWeaponAxis[3][3] = {};
             if (kisak::vr::weapon_calibration::BlendWeaponAxes(
@@ -20702,6 +21462,13 @@ bool VR_ApplyRightControllerToWeaponPlacement(
             sizeof(calibrationCameraLocal));
 
         g_vrRightControllerWeaponCalibrationValid = true;
+
+        std::memcpy(
+            g_vrEffectiveWeaponGripPositionCameraLocal,
+            currentPosition,
+            sizeof(g_vrEffectiveWeaponGripPositionCameraLocal));
+        g_vrEffectiveWeaponGripPositionValid =
+            twoHandBlend > 0.001f;
     }
 
     float weaponOriginCameraLocal[3] = {};
@@ -20771,6 +21538,60 @@ bool VR_ApplyRightControllerToWeaponPlacement(
                     cameraAxis[1][worldComponent] +
                 weaponRowCameraLocal[2] *
                     cameraAxis[2][worldComponent];
+        }
+    }
+
+    // Aiming & Stabilization (Virtual Gunstock)
+    // Filters out micro-tremors and securely anchors weapon tracking into the shoulder pocket when aiming down sights (ADS).
+    if (g_vrVirtualStockEnabled && (adsFraction > 0.05f || twoHandBlend > 0.35f))
+    {
+        const float dominantSign = (configurable.dominantHand == VrInteractions::DominantHand::Left) ? -1.0f : 1.0f;
+        const float rigScale = g_vrTPoseTelemetry.valid ? g_vrTPoseTelemetry.rigScaleFactor : 1.0f;
+        const float shoulderPocketCameraLocal[3] = {
+            dominantSign * (5.2f * rigScale),
+            -6.8f * rigScale,
+            -3.8f * rigScale
+        };
+
+        const float stockBlend = std::clamp((std::max)(adsFraction, twoHandBlend * 0.85f), 0.0f, 1.0f);
+
+        static float s_smoothedAngles[3] = {};
+        static bool s_hasSmoothedAngles = false;
+
+        float currentAngles[3] = {};
+        AxisToAngles(finalWeaponAxisCameraLocal, currentAngles);
+
+        if (!s_hasSmoothedAngles || stockBlend < 0.10f)
+        {
+            std::memcpy(s_smoothedAngles, currentAngles, sizeof(s_smoothedAngles));
+            s_hasSmoothedAngles = true;
+        }
+        else
+        {
+            // Low-pass exponential smoothing to damp micro-tremors while maintaining instant response
+            const float smoothing = std::clamp(0.28f + (1.0f - adsFraction) * 0.45f, 0.22f, 0.85f);
+            for (int i = 0; i < 3; ++i)
+            {
+                float diff = currentAngles[i] - s_smoothedAngles[i];
+                while (diff > 180.0f) diff -= 360.0f;
+                while (diff < -180.0f) diff += 360.0f;
+                s_smoothedAngles[i] += diff * smoothing;
+            }
+
+            float smoothedAxis[3][3] = {};
+            AnglesToAxis(s_smoothedAngles, smoothedAxis);
+            std::memcpy(finalWeaponAxisCameraLocal, smoothedAxis, sizeof(finalWeaponAxisCameraLocal));
+
+            for (int weaponAxisRow = 0; weaponAxisRow < 3; ++weaponAxisRow)
+            {
+                for (int worldComponent = 0; worldComponent < 3; ++worldComponent)
+                {
+                    weaponAxis[weaponAxisRow][worldComponent] =
+                        finalWeaponAxisCameraLocal[weaponAxisRow][0] * cameraAxis[0][worldComponent] +
+                        finalWeaponAxisCameraLocal[weaponAxisRow][1] * cameraAxis[1][worldComponent] +
+                        finalWeaponAxisCameraLocal[weaponAxisRow][2] * cameraAxis[2][worldComponent];
+                }
+            }
         }
     }
 
@@ -22139,9 +22960,13 @@ bool VR_GetRightControllerWeaponCommand(
             g_vrManualMagazineReload.stage !=
                 VrManualMagazineReloadStage::Ready;
 
+        const bool weaponIsHolstered =
+            VR_IsPhysicalWeaponHolstered();
+
         currentAttackPressed =
             g_vrRightControllerAttackPressed &&
-            !manualMagazineIsOut;
+            !manualMagazineIsOut &&
+            !weaponIsHolstered;
 
         forward[0] =
             g_vrRightControllerFinalWeaponForward[0];
@@ -22293,6 +23118,9 @@ static bool VR_RecenterHeadForMode(
         VrCalibration::RecenterModeId(mode),
         needsPosition ? "updated" : "preserved",
         needsDirectionLevel ? "updated" : "preserved");
+
+    s_staticWorldCanvasActive = false;
+    s_openVrStaticCanvasActive = false;
 
     return true;
 }
@@ -25125,6 +25953,7 @@ bool VR_UpdateOpenVrControllerActions()
             g_vrWeaponControllerPoseMutex);
         g_vrRightControllerSqueezePressedRaw =
             weaponGripActive && weaponGripPressed;
+        g_vrRightControllerSqueezeAvailable = weaponGripActive;
     }
 
     const VrControllerRenderPose&
@@ -25824,6 +26653,26 @@ void VR_FrameOpenVr()
             0,
             0x10);
 
+    const bool isCutsceneTheater =
+        VR_IsCutsceneTheaterActive();
+    const bool isSpatialEnvironment =
+        isCutsceneTheater || VR_IsSpatial3DMenuActive();
+    const bool isStaticWorldCanvas =
+        isCutsceneTheater || menuComfortMode || (clientUIActives[0].connectionState < CA_ACTIVE);
+
+    if (isStaticWorldCanvas && submissionViewsValid)
+    {
+        if (!s_openVrStaticCanvasActive)
+        {
+            s_latchedOpenVrHeadPose = VR_OpenVrHeadMatrixFromViews(submissionViews);
+            s_openVrStaticCanvasActive = true;
+        }
+    }
+    else
+    {
+        s_openVrStaticCanvasActive = false;
+    }
+
     const bool centeredModalComfortMode =
         menuComfortMode &&
         VR_IsCenteredMonoscopicMenuActive();
@@ -25888,7 +26737,7 @@ void VR_FrameOpenVr()
         texture.eColorSpace =
             vr::ColorSpace_Auto;
         texture.mDeviceToAbsoluteTracking =
-            submissionHeadPose;
+            s_openVrStaticCanvasActive ? s_latchedOpenVrHeadPose : submissionHeadPose;
 
         const vr::EVRCompositorError submitResult =
             g_vrOpenVrCompositor->Submit(
@@ -26872,6 +27721,8 @@ void VR_Shutdown()
     g_vrCenteredModalBlitVertexBuffer.Reset();
     g_vrLoggedMenuComfortScreen = false;
     g_vrLoggedCanonicalMenuAspect = false;
+    s_staticWorldCanvasActive = false;
+    s_openVrStaticCanvasActive = false;
 
     for (auto& vertexBuffer :
          g_vrBlitVertexBuffers)
@@ -27631,3 +28482,239 @@ bool VR_GetPhysicalSniperScopeAimWorld(
 
     return true;
 }
+
+// -------------------------------------------------------------------------
+// Smooth Turn & Locomotion Controls
+// -------------------------------------------------------------------------
+void VR_SetTurnMode(VrTurnMode mode)
+{
+    g_vrTurnMode = mode;
+    Com_Printf(0, "[VR][CONTROLS] Turn mode set to %s.\n",
+        mode == VrTurnMode::Smooth ? "Smooth" : "Snap");
+}
+
+VrTurnMode VR_GetTurnMode()
+{
+    return g_vrTurnMode;
+}
+
+void VR_SetSmoothTurnSpeed(float degreesPerSecond)
+{
+    g_vrSmoothTurnSpeedDegreesPerSecond = std::clamp(degreesPerSecond, 30.0f, 360.0f);
+}
+
+float VR_GetSmoothTurnSpeed()
+{
+    return g_vrSmoothTurnSpeedDegreesPerSecond;
+}
+
+// -------------------------------------------------------------------------
+// Virtual Gunstock / Aim Stabilization
+// -------------------------------------------------------------------------
+void VR_SetVirtualStockEnabled(bool enabled)
+{
+    g_vrVirtualStockEnabled = enabled;
+    Com_Printf(0, "[VR][STOCK] Virtual gunstock aim stabilization %s.\n",
+        enabled ? "enabled" : "disabled");
+}
+
+bool VR_IsVirtualStockEnabled()
+{
+    return g_vrVirtualStockEnabled;
+}
+
+// -------------------------------------------------------------------------
+// 3D Diegetic Compass Mode
+// -------------------------------------------------------------------------
+void VR_SetCompassMode(VrCompassMode mode)
+{
+    g_vrCompassMode = mode;
+    const char* names[] = { "3D Diegetic Forearm Watch", "3D Floating World-Space", "Classic 2D HUD", "Disabled" };
+    Com_Printf(0, "[VR][COMPASS] Compass mode set to: %s\n", names[static_cast<int>(mode)]);
+}
+
+VrCompassMode VR_GetCompassMode()
+{
+    return g_vrCompassMode;
+}
+
+// -------------------------------------------------------------------------
+// In-Game T-Pose Calibration Wizard (COD4 MW Briefing Themed)
+// -------------------------------------------------------------------------
+void VR_StartTPoseCalibration()
+{
+    g_vrTPoseWizardActive = true;
+    g_vrTPoseHoldStartMs = 0u;
+    g_vrTPoseConfirmed = false;
+    Com_Printf(0, "[VR][CALIBRATION] MW Briefing T-Pose Calibration Wizard engaged. Assume physical T-Pose and pull triggers.\n");
+}
+
+bool VR_IsTPoseCalibrating()
+{
+    return g_vrTPoseWizardActive;
+}
+
+const VrTPoseCalibrationTelemetry& VR_GetTPoseTelemetry()
+{
+    return g_vrTPoseTelemetry;
+}
+
+// -------------------------------------------------------------------------
+// Operator Model Customization & Mission Skip Protocol
+// -------------------------------------------------------------------------
+void VR_SetPlayerFactionOverride(int faction)
+{
+    g_vrPlayerFactionOverride = faction;
+    Com_Printf(0, "[VR][OPERATOR] Active operator model faction override set to %d.\n", faction);
+}
+
+int VR_GetPlayerFactionOverride()
+{
+    return g_vrPlayerFactionOverride;
+}
+
+void VR_CyclePlayerFactionOverride()
+{
+    g_vrPlayerFactionOverride++;
+    if (g_vrPlayerFactionOverride > 5)
+    {
+        g_vrPlayerFactionOverride = -1;
+    }
+    const char* names[] = {
+        "Mission Default",
+        "SAS Urban (Black Kit)",
+        "SAS Woodland (Peter)",
+        "SAS Night Vision (Price)",
+        "USMC Interceptor (James)",
+        "OpFor Disguise (Soap)",
+        "USMC Ghillie Sniper (Price)"
+    };
+    Com_Printf(0, "[VR][OPERATOR] Operator Model Swapped to: %s\n", names[g_vrPlayerFactionOverride + 1]);
+}
+
+bool VR_SkipToNextMission()
+{
+    static const char* const kCampaignMissions[] = {
+        "killhouse",
+        "cargoship",
+        "coup",
+        "blackout",
+        "armada",
+        "bog_a",
+        "hunted",
+        "ac130",
+        "bog_b",
+        "airlift",
+        "aftermath",
+        "village_assault",
+        "scoutsniper",
+        "sniperescape",
+        "village_defend",
+        "ambush",
+        "icbm",
+        "launchfacility_a",
+        "launchfacility_b",
+        "jeepride",
+        "airplane"
+    };
+    constexpr std::size_t kMissionCount = sizeof(kCampaignMissions) / sizeof(kCampaignMissions[0]);
+
+    const dvar_t* mapDvar = Dvar_FindVar("mapname");
+    const char* activeMap = (mapDvar && mapDvar->current.string) ? mapDvar->current.string : "";
+    std::size_t nextIndex = 0;
+    if (activeMap[0] != '\0')
+    {
+        for (std::size_t i = 0; i < kMissionCount; ++i)
+        {
+            if (std::strstr(activeMap, kCampaignMissions[i]) != nullptr)
+            {
+                nextIndex = (i + 1) % kMissionCount;
+                break;
+            }
+        }
+    }
+
+    const char* nextMission = kCampaignMissions[nextIndex];
+    Com_Printf(0, "[VR][FAILSAFE] Emergency Mission Skip Protocol engaged: '%s' -> '%s'.\n",
+        activeMap, nextMission);
+
+    Cbuf_AddText(0, va("devmap %s\n", nextMission));
+    return true;
+}
+
+// -------------------------------------------------------------------------
+// Seated vs. Standing Mode
+// -------------------------------------------------------------------------
+void VR_SetSeatedMode(bool seated)
+{
+    g_vrSeatedMode = seated;
+    Com_Printf(0, "[VR][COMFORT] VR Playstyle set to: %s\n", seated ? "SEATED" : "STANDING");
+}
+
+bool VR_IsSeatedMode()
+{
+    return g_vrSeatedMode;
+}
+
+void VR_ToggleSeatedMode()
+{
+    VR_SetSeatedMode(!g_vrSeatedMode);
+}
+
+// -------------------------------------------------------------------------
+// Holster Tethering / Hold-to-Grip
+// -------------------------------------------------------------------------
+void VR_SetHoldToGripEnabled(bool enabled)
+{
+    g_vrHoldToGripEnabled = enabled;
+    Com_Printf(0, "[VR][INPUT] Holster Tethering (Hold-to-Grip) is %s.\n", enabled ? "ENABLED" : "DISABLED");
+}
+
+bool VR_IsHoldToGripEnabled()
+{
+    return g_vrHoldToGripEnabled;
+}
+
+void VR_ToggleHoldToGrip()
+{
+    VR_SetHoldToGripEnabled(!g_vrHoldToGripEnabled);
+}
+
+bool VR_IsPhysicalWeaponHolstered()
+{
+    return g_vrHoldToGripEnabled && g_vrPhysicalBodyRig.weaponHolstered;
+}
+
+// -------------------------------------------------------------------------
+// 3D Menu Laser Pointer & Selection
+// -------------------------------------------------------------------------
+bool VR_IsMenuLaserActive()
+{
+    return g_vrMenuLaserActive;
+}
+
+void VR_GetMenuLaserScreenPos(float* outX, float* outY)
+{
+    if (outX) *outX = g_vrMenuLaserScreenX;
+    if (outY) *outY = g_vrMenuLaserScreenY;
+}
+
+bool VR_ConsumeMenuLaserClick()
+{
+    if (g_vrMenuLaserClicked)
+    {
+        g_vrMenuLaserClicked = false;
+        return true;
+    }
+    return false;
+}
+
+// -------------------------------------------------------------------------
+// Physical Grenade Pin Pull Mechanics
+// -------------------------------------------------------------------------
+bool VR_IsGrenadePinPulled()
+{
+    return g_vrManualGrenade.pinPulled;
+}
+
+

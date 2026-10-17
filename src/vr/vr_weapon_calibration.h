@@ -23,6 +23,19 @@ inline void MultiplyAxes(
     }
 }
 
+inline void TransposeAxis(
+    const float input[3][3],
+    float output[3][3])
+{
+    for (int row = 0; row < 3; ++row)
+    {
+        for (int column = 0; column < 3; ++column)
+        {
+            output[row][column] = input[column][row];
+        }
+    }
+}
+
 inline bool BuildAxisFromForwardAndUpHint(
     const float forwardHint[3],
     const float upHint[3],
@@ -128,11 +141,24 @@ inline bool BuildTwoHandTargetAxis(
     const float weaponControllerAxis[3][3],
     float targetAxis[3][3])
 {
-    const float handLine[3] = {
+    float handLine[3] = {
         offHandPosition[0] - weaponHandPosition[0],
         offHandPosition[1] - weaponHandPosition[1],
         offHandPosition[2] - weaponHandPosition[2],
     };
+    const float handLineLengthSq =
+        handLine[0] * handLine[0] +
+        handLine[1] * handLine[1] +
+        handLine[2] * handLine[2];
+    constexpr float kMinStableBaseline = 5.5f;
+    if (handLineLengthSq < kMinStableBaseline * kMinStableBaseline)
+    {
+        const float handLineLength = std::sqrt(handLineLengthSq);
+        const float forwardBias = kMinStableBaseline - handLineLength;
+        handLine[0] += weaponControllerAxis[0][0] * forwardBias;
+        handLine[1] += weaponControllerAxis[0][1] * forwardBias;
+        handLine[2] += weaponControllerAxis[0][2] * forwardBias;
+    }
     return BuildAxisFromForwardAndUpHint(
         handLine,
         weaponControllerAxis[2],

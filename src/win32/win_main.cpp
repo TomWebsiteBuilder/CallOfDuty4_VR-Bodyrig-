@@ -922,6 +922,52 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		0,
 		"[VR][CRASH] V48 crash recorder ready: unhandled main/worker "
 		"exceptions write a text report and minidump in CrashDumps.\n");
+
+	// First-Time Launch Prompt & T-Pose Calibration Wizard
+	FILE* fFirstRunCheck = fopen("main/vr_first_run.dat", "rb");
+	if (!fFirstRunCheck)
+	{
+		const int promptResponse = MessageBoxA(
+			g_wv.hWnd,
+			"Is this your first time running COD4 VR?\n\n"
+			"Select [Yes] to open the VR Configurator & Calibration Tool.\n"
+			"Select [No] to continue normally into COD4 VR.\n"
+			"Select [Cancel] for 'Don't ask again'.",
+			"COD4 VR - First Launch Setup",
+			MB_YESNOCANCEL | MB_ICONQUESTION);
+		if (promptResponse == IDYES)
+		{
+			STARTUPINFOA si = { sizeof(si) };
+			PROCESS_INFORMATION pi = {};
+			if (CreateProcessA(
+				"KisakCOD-VR-Configurator.exe",
+				NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+			{
+				WaitForSingleObject(pi.hProcess, INFINITE);
+				CloseHandle(pi.hProcess);
+				CloseHandle(pi.hThread);
+			}
+			FILE* fRecord = fopen("main/vr_first_run.dat", "wb");
+			if (fRecord)
+			{
+				fputs("configured\n", fRecord);
+				fclose(fRecord);
+			}
+		}
+		else if (promptResponse == IDCANCEL)
+		{
+			FILE* fRecord = fopen("main/vr_first_run.dat", "wb");
+			if (fRecord)
+			{
+				fputs("dont_ask_again\n", fRecord);
+				fclose(fRecord);
+			}
+		}
+	}
+	else
+	{
+		fclose(fFirstRunCheck);
+	}
 #endif
 
 #ifdef KISAK_MP

@@ -71,6 +71,9 @@ const dvar_t *compassIconTankWidth;
 const dvar_t *compassIconTankHeight;
 const dvar_t *compassIconOtherVehWidth;
 const dvar_t *compassIconOtherVehHeight;
+const dvar_t *vr_compassMode = nullptr;
+const dvar_t *vr_compassScale = nullptr;
+const dvar_t *vr_compassAlpha = nullptr;
 #endif
 
 void __cdecl CG_CompassRegisterDvars()
@@ -431,6 +434,9 @@ void __cdecl CG_CompassRegisterDvars()
     compassIconTankHeight = Dvar_RegisterFloat("compassIconTankHeight", 35.0, 0.0, FLT_MAX, 0, 0);
     compassIconOtherVehWidth = Dvar_RegisterFloat("compassIconOtherVehWidth", 40.0, 0.0, FLT_MAX, 0, 0);
     compassIconOtherVehHeight = Dvar_RegisterFloat("compassIconOtherVehHeight", 40.0, 0.0, FLT_MAX, 0, 0);
+    vr_compassMode = Dvar_RegisterInt("vr_compassMode", 0, 0, 3, DVAR_ARCHIVE, "VR Compass Mode (0: Forearm Watch, 1: 3D Floating World, 2: HUD, 3: Disabled)");
+    vr_compassScale = Dvar_RegisterFloat("vr_compassScale", 1.0f, 0.1f, 3.0f, DVAR_ARCHIVE, "VR Compass Scale");
+    vr_compassAlpha = Dvar_RegisterFloat("vr_compassAlpha", 0.9f, 0.0f, 1.0f, DVAR_ARCHIVE, "VR Compass Alpha");
 #endif
     compassDebug = Dvar_RegisterBool("compassDebug", 0, 1u, "Compass Debugging Mode");
     minbj.value.max = 10.0f;
@@ -673,6 +679,26 @@ void __cdecl CG_CompassCalcDimensions(
             *w = transformed.width;
             *h = transformed.height;
 
+            if (vr_compassScale && vr_compassScale->current.value > 0.0f)
+            {
+                *w *= vr_compassScale->current.value;
+                *h *= vr_compassScale->current.value;
+            }
+
+            int compassMode = vr_compassMode ? vr_compassMode->current.integer : static_cast<int>(VR_GetCompassMode());
+            if (compassMode == 0) // Diegetic Forearm Watch
+            {
+                *x = 80.0f;
+                *y = 440.0f;
+            }
+            else if (compassMode == 1) // 3D Floating World-Space
+            {
+                *x = (kisak::vr::hud::kCanvasWidth - *w) * 0.5f;
+                *y = 520.0f;
+            }
+            // compassMode == 2: Standard 2D HUD (keeps transformed layout)
+            // compassMode == 3: Disabled (handled in CG_FadeCompass)
+
             static bool loggedVrCompassSafeArea = false;
 
             if (!loggedVrCompassSafeArea)
@@ -684,10 +710,11 @@ void __cdecl CG_CompassCalcDimensions(
                 Com_Printf(
                     0,
                     "[VR][HUD] SP compass and editor share center "
-                    "%.1f/%.1f at %.2f scale.\n",
+                    "%.1f/%.1f at %.2f scale (mode %d).\n",
                     center.x,
                     center.y,
-                    layout.compassScale);
+                    layout.compassScale,
+                    compassMode);
 
                 loggedVrCompassSafeArea = true;
             }
@@ -707,7 +734,21 @@ double __cdecl CG_FadeCompass(int32_t localClientNum, int32_t displayStartTime, 
     if (compassType)
         return 1.0;
 
-    return CG_FadeHudMenu(localClientNum, hud_fade_compass, displayStartTime, SnapFloatToInt(hud_fade_compass->current.value * 1000.0f));}
+#ifdef KISAK_SP
+    if (VR_IsInitialized())
+    {
+        int mode = vr_compassMode ? vr_compassMode->current.integer : static_cast<int>(VR_GetCompassMode());
+        if (mode == 3)
+        {
+            return 0.0;
+        }
+        float alpha = vr_compassAlpha ? vr_compassAlpha->current.value : 0.9f;
+        return (double)alpha * CG_FadeHudMenu(localClientNum, hud_fade_compass, displayStartTime, SnapFloatToInt(hud_fade_compass->current.value * 1000.0f));
+    }
+#endif
+
+    return CG_FadeHudMenu(localClientNum, hud_fade_compass, displayStartTime, SnapFloatToInt(hud_fade_compass->current.value * 1000.0f));
+}
 
 void __cdecl CG_CompassDrawPlayerBack(
     int32_t localClientNum,

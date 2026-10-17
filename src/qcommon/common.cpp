@@ -2202,6 +2202,10 @@ bool __cdecl Com_LogFileOpen()
 
 void __cdecl Com_Close()
 {
+#ifdef KISAK_SP
+    extern void VR_FreeManualReloadClipRenderObjectsForShutdown();
+    VR_FreeManualReloadClipRenderObjectsForShutdown();
+#endif
     Com_ShutdownDObj();
     DObjShutdown();
     XAnimShutdown();

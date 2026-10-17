@@ -1434,6 +1434,376 @@ void VR_DrawHudEditorOverlay(const int localClientNum)
     }
 }
 
+void VR_DrawTPoseCalibrationOverlay(const int localClientNum)
+{
+    if (!VR_IsInitialized() || !VR_IsTPoseCalibrating())
+    {
+        return;
+    }
+
+    const ScreenPlacement* const placement = &scrPlaceView[localClientNum];
+    Font_s* const font = UI_GetFontHandle(placement, 6, 0.30f);
+
+    // Call of Duty: Modern Warfare briefing room dark emerald/slate backdrop
+    const float mwBackdrop[4] = {0.015f, 0.025f, 0.02f, 0.88f};
+    const float mwBorder[4] = {0.20f, 0.78f, 0.35f, 0.95f};
+    const float mwGrid[4] = {0.12f, 0.35f, 0.20f, 0.40f};
+    const float mwTextWhite[4] = {0.95f, 0.98f, 0.95f, 1.0f};
+    const float mwTextMuted[4] = {0.60f, 0.75f, 0.65f, 0.95f};
+    const float mwAmber[4] = {0.95f, 0.78f, 0.18f, 1.0f};
+    const float mwHighlight[4] = {0.35f, 0.95f, 0.55f, 1.0f};
+
+    // Full canvas briefing panel
+    UI_FillRect(placement, 40.0f, 30.0f, 560.0f, 420.0f, 0, 0, mwBackdrop);
+
+    // Modern Warfare tactical border
+    VR_DrawHudEditorOutline(placement, 40.0f, 30.0f, 560.0f, 420.0f, 2.0f, mwBorder);
+
+    // Tactical scanlines/grid inside briefing area
+    for (float y = 70.0f; y <= 410.0f; y += 40.0f)
+    {
+        UI_FillRect(placement, 45.0f, y, 550.0f, 1.0f, 0, 0, mwGrid);
+    }
+
+    // Header: Modern Warfare Biometric Calibration
+    UI_DrawText(
+        placement,
+        "[ COD4: MODERN WARFARE - OPERATOR CALIBRATION WIZARD ]",
+        0x7FFFFFFF,
+        font,
+        60.0f,
+        58.0f,
+        0,
+        0,
+        0.28f,
+        mwHighlight,
+        3);
+
+    // Subheader / Mission context
+    UI_DrawText(
+        placement,
+        "SAS / USMC TACTICAL ARMORY - BIOMETRIC TELEMETRY ALIGNMENT",
+        0x7FFFFFFF,
+        font,
+        60.0f,
+        82.0f,
+        0,
+        0,
+        0.18f,
+        mwTextMuted,
+        3);
+
+    // Step 1: Physical Posture
+    UI_DrawText(
+        placement,
+        "1. STAND UPRIGHT WITH PHYSICAL ARMS FULLY EXTENDED (T-POSE)",
+        0x7FFFFFFF,
+        font,
+        60.0f,
+        125.0f,
+        0,
+        0,
+        0.23f,
+        mwTextWhite,
+        3);
+
+    // Step 2: Trigger input
+    UI_DrawText(
+        placement,
+        "2. SQUEEZE AND HOLD BOTH TRIGGERS TO CAPTURE BIOMETRICS",
+        0x7FFFFFFF,
+        font,
+        60.0f,
+        155.0f,
+        0,
+        0,
+        0.23f,
+        mwTextWhite,
+        3);
+
+    const VrTPoseCalibrationTelemetry& telem = VR_GetTPoseTelemetry();
+
+    // Telemetry status
+    const bool confirmed = telem.valid;
+    const float* statusColor = confirmed ? mwHighlight : mwAmber;
+    const char* statusStr = confirmed
+        ? "STATUS: [ CALIBRATION CONFIRMED - DYNAMIC SCALING APPLIED ]"
+        : "STATUS: [ AWAITING OPERATOR INPUT - HOLD TRIGGERS IN T-POSE ]";
+
+    UI_DrawText(
+        placement,
+        statusStr,
+        0x7FFFFFFF,
+        font,
+        60.0f,
+        200.0f,
+        0,
+        0,
+        0.24f,
+        statusColor,
+        3);
+
+    // Telemetry readouts box
+    UI_FillRect(placement, 60.0f, 220.0f, 520.0f, 160.0f, 0, 0, mwGrid);
+    VR_DrawHudEditorOutline(placement, 60.0f, 220.0f, 520.0f, 160.0f, 1.5f, mwBorder);
+
+    char buf[128];
+    Com_sprintf(buf, sizeof(buf), "OPERATOR STANDING HEIGHT : %.1f INCHES (%.2f METERS)",
+        telem.standingEyeHeightInches, telem.standingEyeHeightInches * 0.0254f);
+    UI_DrawText(placement, buf, 0x7FFFFFFF, font, 75.0f, 248.0f, 0, 0, 0.20f, mwTextWhite, 3);
+
+    Com_sprintf(buf, sizeof(buf), "PHYSICAL WINGSPAN        : %.1f INCHES", telem.wingspanInches);
+    UI_DrawText(placement, buf, 0x7FFFFFFF, font, 75.0f, 276.0f, 0, 0, 0.20f, mwTextWhite, 3);
+
+    Com_sprintf(buf, sizeof(buf), "SHOULDER BREADTH         : %.1f INCHES", telem.shoulderWidthInches);
+    UI_DrawText(placement, buf, 0x7FFFFFFF, font, 75.0f, 304.0f, 0, 0, 0.20f, mwTextWhite, 3);
+
+    Com_sprintf(buf, sizeof(buf), "BODY RIG SCALE FACTOR    : %.2fX DYNAMIC SCALING", telem.rigScaleFactor);
+    UI_DrawText(placement, buf, 0x7FFFFFFF, font, 75.0f, 332.0f, 0, 0, 0.20f, mwTextWhite, 3);
+
+    UI_DrawText(
+        placement,
+        "VIRTUAL GUNSTOCK         : CALIBRATED TO SHOULDER POCKET",
+        0x7FFFFFFF,
+        font,
+        75.0f,
+        360.0f,
+        0,
+        0,
+        0.20f,
+        mwHighlight,
+        3);
+
+    // Seated vs Standing playstyle indicator
+    Com_sprintf(buf, sizeof(buf), "VR PLAYSTYLE MODE        : %s (%s)",
+        VR_IsSeatedMode() ? "SEATED" : "STANDING",
+        VR_IsSeatedMode() ? "+18.0 IN STATURE COMPENSATION" : "NATURAL FLOOR STAGE");
+    UI_DrawText(placement, buf, 0x7FFFFFFF, font, 75.0f, 386.0f, 0, 0, 0.20f, VR_IsSeatedMode() ? mwAmber : mwHighlight, 3);
+
+    // Footer instruction
+    UI_DrawText(
+        placement,
+        confirmed ? "Operator telemetry locked. Resuming tactical deployment..." : "Hold physical T-pose and pull triggers to capture baselines.",
+        0x7FFFFFFF,
+        font,
+        60.0f,
+        415.0f,
+        0,
+        0,
+        0.18f,
+        mwTextMuted,
+        3);
+}
+
+void VR_DrawWristAmmoCounter(const int localClientNum)
+{
+    if (!VR_IsInitialized() || !cg_drawHUD->current.enabled)
+    {
+        return;
+    }
+
+    const dvar_t* dvarWrist = Dvar_FindVar("vr_wristAmmo");
+    if (dvarWrist && !dvarWrist->current.enabled)
+    {
+        return;
+    }
+
+    const playerState_s* ps = &cgArray[localClientNum].predictedPlayerState;
+    if (ps == nullptr || ps->weapon == 0u)
+    {
+        return;
+    }
+
+    const int weaponNum = ps->weapon;
+    const WeaponDef* weapDef = BG_GetWeaponDef(weaponNum);
+    if (weapDef == nullptr || weapDef->inventoryType == WEAPINVENTORY_OFFHAND)
+    {
+        return;
+    }
+
+    const int clipIndex = BG_ClipForWeapon(weaponNum);
+    const int ammoIndex = BG_AmmoForWeapon(weaponNum);
+    const int clipCount = ps->ammoclip[clipIndex];
+    const int reserveCount = ps->ammo[ammoIndex];
+
+    const ScreenPlacement* const placement = &scrPlaceView[localClientNum];
+    Font_s* const font = UI_GetFontHandle(placement, 6, 0.25f);
+
+    // Position on wrist HUD area (above forearm watch compass at y=440)
+    const float x = 70.0f;
+    const float y = 392.0f;
+    const float w = 92.0f;
+    const float h = 32.0f;
+
+    const bool lowAmmo = (clipCount <= 5 && clipCount > 0);
+    const bool empty = (clipCount == 0);
+
+    const float bgSlate[4] = {0.015f, 0.025f, 0.02f, 0.85f};
+    const float borderGreen[4] = {0.20f, 0.78f, 0.35f, 0.90f};
+    const float borderAmber[4] = {0.95f, 0.75f, 0.15f, 0.95f};
+    const float borderRed[4] = {0.95f, 0.22f, 0.18f, 0.95f};
+    const float textWhite[4] = {0.95f, 0.98f, 0.95f, 1.0f};
+    const float textMuted[4] = {0.60f, 0.75f, 0.65f, 0.95f};
+    const float textAmber[4] = {0.98f, 0.78f, 0.15f, 1.0f};
+
+    const float* borderCol = empty ? borderRed : (lowAmmo ? borderAmber : borderGreen);
+
+    UI_FillRect(placement, x, y, w, h, 0, 0, bgSlate);
+    VR_DrawHudEditorOutline(placement, x, y, w, h, 1.5f, borderCol);
+
+    UI_DrawText(placement, "AMMO", 0x7FFFFFFF, font, x + 6.0f, y + 12.0f, 0, 0, 0.15f, textMuted, 3);
+
+    char ammoStr[64] = {};
+    if (empty)
+    {
+        Com_sprintf(ammoStr, sizeof(ammoStr), "EMPTY | %d", reserveCount);
+        UI_DrawText(placement, ammoStr, 0x7FFFFFFF, font, x + 6.0f, y + 26.0f, 0, 0, 0.18f, borderRed, 3);
+    }
+    else
+    {
+        Com_sprintf(ammoStr, sizeof(ammoStr), "%d | %d", clipCount, reserveCount);
+        UI_DrawText(placement, ammoStr, 0x7FFFFFFF, font, x + 6.0f, y + 26.0f, 0, 0, 0.20f, lowAmmo ? textAmber : textWhite, 3);
+    }
+}
+
+void VR_DrawSettingsOverlay(const int localClientNum)
+{
+    if (!VR_IsInitialized())
+    {
+        return;
+    }
+
+    const bool isPaused = (cg_paused && cg_paused->current.integer);
+    const bool menuCatcher = Key_IsCatcherActive(0, 0x10);
+    if (!isPaused || !menuCatcher)
+    {
+        return;
+    }
+
+    const ScreenPlacement* const placement = &scrPlaceView[localClientNum];
+    Font_s* const font = UI_GetFontHandle(placement, 6, 0.25f);
+
+    const float bgPanel[4] = {0.012f, 0.020f, 0.016f, 0.92f};
+    const float borderActive[4] = {0.20f, 0.78f, 0.35f, 0.95f};
+    const float textWhite[4] = {0.95f, 0.98f, 0.95f, 1.0f};
+    const float textMuted[4] = {0.60f, 0.75f, 0.65f, 0.95f};
+    const float colAmber[4] = {0.95f, 0.78f, 0.18f, 1.0f};
+    const float colHighlight[4] = {0.35f, 0.95f, 0.55f, 1.0f};
+    const float btnBg[4] = {0.04f, 0.07f, 0.05f, 0.85f};
+    const float btnHoverBg[4] = {0.12f, 0.28f, 0.16f, 0.95f};
+
+    const float panelX = 275.0f;
+    const float panelY = 45.0f;
+    const float panelW = 335.0f;
+    const float panelH = 390.0f;
+
+    UI_FillRect(placement, panelX, panelY, panelW, panelH, 0, 0, bgPanel);
+    VR_DrawHudEditorOutline(placement, panelX, panelY, panelW, panelH, 1.8f, borderActive);
+
+    UI_DrawText(placement, "// S.A.S. TACTICAL VR SYSTEMS CONFIGURATION //", 0x7FFFFFFF, font, panelX + 12.0f, panelY + 20.0f, 0, 0, 0.19f, colHighlight, 3);
+    UI_FillRect(placement, panelX + 12.0f, panelY + 26.0f, panelW - 24.0f, 1.0f, 0, 0, borderActive);
+
+    float laserX = 0.0f;
+    float laserY = 0.0f;
+    const bool laserActive = VR_IsMenuLaserActive();
+    if (laserActive)
+    {
+        VR_GetMenuLaserScreenPos(&laserX, &laserY);
+    }
+    const bool clicked = VR_ConsumeMenuLaserClick();
+
+    struct SettingItem {
+        const char* label;
+        const char* value;
+        bool highlight;
+    };
+
+    const char* turnNames[] = { "SNAP (45 DEG)", "SMOOTH" };
+    const char* compassNames[] = { "FOREARM WATCH", "3D FLOATING", "2D HUD", "DISABLED" };
+    const char* factionNames[] = {
+        "MISSION DEFAULT",
+        "SAS URBAN (BLACK)",
+        "SAS WOODLAND",
+        "SAS NVG",
+        "USMC INTERCEPTOR",
+        "OPFOR DISGUISE",
+        "GHILLIE SNIPER"
+    };
+
+    const int factionIdx = VR_GetPlayerFactionOverride() + 1;
+    const int compassIdx = static_cast<int>(VR_GetCompassMode());
+
+    SettingItem items[8] = {
+        { "1. VIRTUAL GUNSTOCK", VR_IsVirtualStockEnabled() ? "ENABLED (LOCKED)" : "DISABLED", VR_IsVirtualStockEnabled() },
+        { "2. TURN ROTATION", turnNames[static_cast<int>(VR_GetTurnMode())], VR_GetTurnMode() == VrTurnMode::Smooth },
+        { "3. 3D COMPASS MODE", compassNames[compassIdx >= 0 && compassIdx < 4 ? compassIdx : 0], compassIdx == 0 || compassIdx == 1 },
+        { "4. VR PLAYSTYLE", VR_IsSeatedMode() ? "SEATED (+18 IN STATURE)" : "STANDING", VR_IsSeatedMode() },
+        { "5. HOLSTER TETHER", VR_IsHoldToGripEnabled() ? "HOLD-TO-GRIP" : "TOGGLE DRAW", VR_IsHoldToGripEnabled() },
+        { "6. OPERATOR SKIN", factionNames[factionIdx >= 0 && factionIdx < 7 ? factionIdx : 0], factionIdx > 0 },
+        { "7. MISSION ADVANCE", "SKIP CURRENT MISSION", false },
+        { "8. VR CONFIGURATOR", "USE DESKTOP CONFIG TOOL", false },
+    };
+
+    const float startY = panelY + 36.0f;
+    const float rowH = 40.0f;
+    const float btnW = panelW - 24.0f;
+
+    for (int i = 0; i < 8; ++i)
+    {
+        const float bx = panelX + 12.0f;
+        const float by = startY + static_cast<float>(i) * rowH;
+        const bool hovered = laserActive && (laserX >= bx && laserX <= bx + btnW && laserY >= by && laserY <= by + (rowH - 6.0f));
+
+        if (hovered && clicked)
+        {
+            switch (i)
+            {
+            case 0:
+                VR_SetVirtualStockEnabled(!VR_IsVirtualStockEnabled());
+                break;
+            case 1:
+                VR_SetTurnMode(VR_GetTurnMode() == VrTurnMode::Snap ? VrTurnMode::Smooth : VrTurnMode::Snap);
+                break;
+            case 2:
+                VR_SetCompassMode(static_cast<VrCompassMode>((compassIdx + 1) % 4));
+                break;
+            case 3:
+                VR_ToggleSeatedMode();
+                break;
+            case 4:
+                VR_ToggleHoldToGrip();
+                break;
+            case 5:
+                VR_CyclePlayerFactionOverride();
+                break;
+            case 6:
+                VR_SkipToNextMission();
+                break;
+            case 7:
+                Com_Printf(0, "[VR] To adjust posture, stature, or offsets, run 'COD4 VR Settings' / KisakCOD-VR-Configurator.exe.\n");
+                break;
+            default:
+                break;
+            }
+        }
+
+        UI_FillRect(placement, bx, by, btnW, rowH - 6.0f, 0, 0, hovered ? btnHoverBg : btnBg);
+        VR_DrawHudEditorOutline(placement, bx, by, btnW, rowH - 6.0f, hovered ? 1.5f : 1.0f, hovered ? colHighlight : (items[i].highlight ? borderActive : borderActive));
+
+        UI_DrawText(placement, items[i].label, 0x7FFFFFFF, font, bx + 8.0f, by + 14.0f, 0, 0, 0.16f, hovered ? textWhite : textMuted, 3);
+        UI_DrawText(placement, items[i].value, 0x7FFFFFFF, font, bx + 8.0f, by + 27.0f, 0, 0, 0.18f, hovered ? colAmber : (items[i].highlight ? colHighlight : textWhite), 3);
+    }
+
+    if (laserActive)
+    {
+        const float laserCol[4] = {0.20f, 1.0f, 0.40f, 1.0f};
+        UI_FillRect(placement, laserX - 4.0f, laserY - 1.0f, 8.0f, 2.0f, 0, 0, laserCol);
+        UI_FillRect(placement, laserX - 1.0f, laserY - 4.0f, 2.0f, 8.0f, 0, 0, laserCol);
+    }
+
+    UI_DrawText(placement, "Aim laser pointer at option and pull Trigger to toggle.", 0x7FFFFFFF, font, panelX + 16.0f, panelY + panelH - 8.0f, 0, 0, 0.14f, textMuted, 3);
+}
+
 
 void DrawViewmodelInfo(int localClientNum)
 {
@@ -1628,6 +1998,8 @@ void __cdecl CG_Draw2D(int localClientNum)
         }
 
         VR_DrawHudEditorOverlay(localClientNum);
+        VR_DrawWristAmmoCounter(localClientNum);
+        VR_DrawSettingsOverlay(localClientNum);
     }
 }
 

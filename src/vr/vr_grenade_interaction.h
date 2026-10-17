@@ -151,6 +151,7 @@ inline BindingUpdate ResolveObjectBindings(
 struct GripUpdate
 {
     bool grabPressed = false;
+    bool releaseStarted = false;
     bool release = false;
     bool lastValidPoseFallback = false;
 };
@@ -207,6 +208,7 @@ inline GripUpdate UpdateGrip(
     {
         state->releasePending = true;
         state->releasedAt = nowMilliseconds;
+        result.releaseStarted = true;
     }
     constexpr std::uint32_t maximumReleasePoseWaitMilliseconds = 150u;
     if (state->releasePending &&
@@ -221,4 +223,55 @@ inline GripUpdate UpdateGrip(
     }
     return result;
 }
+
+enum class Pouch { None, Frag, Tactical };
+
+inline float DistanceSquared(const float a[3], const float b[3])
+{
+    if (a == nullptr || b == nullptr)
+        return INFINITY;
+    const float x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2];
+    const float distance = x*x + y*y + z*z;
+    return std::isfinite(distance) ? distance : INFINITY;
+}
+
+// Render and pickup share these world-space anchors. Never use the other
+// hand's hip zone to decide which pouch this hand grabs or returns to.
+inline Pouch FindPouch(const float hand[3], const bool poseValid,
+    const float frag[3], const float tactical[3])
+{
+    if (!poseValid)
+        return Pouch::None;
+    const float fragDistance = DistanceSquared(hand, frag);
+    const float tacticalDistance = DistanceSquared(hand, tactical);
+    const bool nearFrag = fragDistance <= 9.2f * 9.2f;
+    const bool nearTactical = tacticalDistance <= 9.8f * 9.8f;
+    if (nearTactical && (!nearFrag || tacticalDistance < fragDistance))
+        return Pouch::Tactical;
+    return nearFrag ? Pouch::Frag : Pouch::None;
+}
+
+inline bool CanReturnToPouch(const float hand[3], const bool poseValid,
+    const float pouch[3])
+{
+    return poseValid && DistanceSquared(hand, pouch) <= 8.8f * 8.8f;
+}
+
+// A return must be visible to both prediction and the SP server. Keep its
+// command-time interval after the next pickup so replayed commands still
+// cancel the original grenade without cancelling the newly drawn one.
+struct ReturnRequest
+{
+    int weaponIndex = 0;
+    std::uint32_t firstCommandTime = 0u;
+    std::uint32_t nextGrabCommandTime = 0u;
+    bool closed = false;
+
+    bool Matches(const int weapon, const std::uint32_t commandTime) const
+    {
+        return weaponIndex > 0 && weaponIndex == weapon &&
+            commandTime - firstCommandTime < 3000u &&
+            (!closed || static_cast<std::int32_t>(commandTime - nextGrabCommandTime) < 0);
+    }
+};
 } // namespace kisak::vr::grenade_interaction

@@ -130,8 +130,10 @@ void GripTracking()
     Expect(!Grip(state,true,true,false,true,40).release,"pose loss alone must not release");
     Expect(!Grip(state,true,true,false,true,5000).release,"prolonged pose loss with grip held is not a release");
     Expect(!Grip(state,true,true,true,true,5010).release,"pose recovery while held must not release");
-    Expect(Grip(state,false,true,true,true,5020).release,"valid real release is immediate");
-    Expect(!Grip(state,false,true,true,false,5030).release,"released stage must not emit twice");
+    Expect(Grip(state,false,true,true,true,5020).releaseStarted,"real release captures the throw before debounce");
+    Expect(!Grip(state,false,true,true,true,5139).release,"119ms release cannot slip out early");
+    Expect(Grip(state,false,true,true,true,5140).release,"confirmed release commits after 120ms");
+    Expect(!Grip(state,false,true,true,false,5150).release,"released stage must not emit twice");
 
     state={}; Grip(state,false,true,true,false,0);
     Expect(!Grip(state,true,true,false,false,10).grabPressed,"press without pose is consumed, not queued");
@@ -147,37 +149,43 @@ void GripTracking()
     Expect(!Grip(state,false,false,false,true,50).release,"runtime-inactive false state cannot throw");
     Expect(!Grip(state,false,false,true,true,5000).release,"inactive action never times into fake release");
     Expect(!Grip(state,true,true,true,true,5010).release,"recovered held action preserves held grenade");
-    Expect(Grip(state,false,true,true,true,5020).release,"actual available release still throws");
+    Expect(Grip(state,false,true,true,true,5020).releaseStarted,"actual available release starts debounce");
+    Expect(Grip(state,false,true,true,true,5140).release,"actual available release still throws");
 
     // The helper receives resolved object hold/toggle state, so physical button
     // release while toggled on must not throw; the second toggle does throw.
     state={}; Grip(state,false,true,true,false,0);
     Expect(Grip(state,true,true,true,false,1).grabPressed,"toggle-on grabs");
     Expect(!Grip(state,true,true,true,true,2).release,"physical release with toggle still on preserves hold");
-    Expect(Grip(state,false,true,true,true,3).release,"toggle-off releases");
+    Expect(Grip(state,false,true,true,true,3).releaseStarted,"toggle-off starts release");
+    Expect(Grip(state,false,true,true,true,123).release,"toggle-off releases after debounce");
 
     for(std::uint32_t start:{0u,100u,0xfffffff0u})
     {
         state={}; Grip(state,true,true,true,false,start-1u);
         Expect(!Grip(state,false,true,false,true,start).release,"real release waits for fresh pose");
-        Expect(!Grip(state,false,true,false,true,start+149u).release,"release wait is bounded but not premature");
-        auto update=Grip(state,false,true,true,true,start+149u);
-        Expect(update.release && !update.lastValidPoseFallback,"fresh pose releases immediately before timeout");
+        Expect(!Grip(state,false,true,false,true,start+269u).release,"pose wait includes the 120ms debounce");
+        auto update=Grip(state,false,true,true,true,start+269u);
+        Expect(update.release && !update.lastValidPoseFallback,"fresh pose releases before fallback timeout");
 
         state={}; Grip(state,true,true,true,false,start-1u);
         Grip(state,false,true,false,true,start);
-        update=Grip(state,false,true,false,true,start+150u);
-        Expect(update.release && update.lastValidPoseFallback,"150ms timeout uses last valid pose only after real release");
+        update=Grip(state,false,true,false,true,start+270u);
+        Expect(update.release && update.lastValidPoseFallback,"120ms debounce plus 150ms pose wait uses last valid pose");
 
         state={}; Grip(state,true,true,true,false,start-1u);
         Grip(state,false,true,false,true,start);
         update=Grip(state,true,true,true,true,start+10u);
-        Expect(update.release,"regrip does not cancel a confirmed deferred release");
-        Expect(!Grip(state,true,true,true,false,start+11u).grabPressed,"regrip while release pending cannot auto-grab next grenade");
+        Expect(!update.release && !state.releasePending,"regrip cancels the uncommitted release");
+        Expect(!Grip(state,true,true,true,true,start+300u).release,"regripped item stays held after original deadline");
+        Expect(Grip(state,false,true,true,true,start+310u).releaseStarted,"fresh release replaces the cancelled throw snapshot");
+        Expect(!Grip(state,false,true,true,true,start+429u).release,"fresh release must wait its own debounce");
+        Expect(Grip(state,false,true,true,true,start+430u).release,"fresh release commits once");
+        Expect(!Grip(state,false,true,true,false,start+431u).grabPressed,"release cannot auto-grab next grenade");
 
         state={}; Grip(state,true,true,true,false,start-1u);
         Grip(state,false,true,false,true,start);
-        update=Grip(state,false,false,false,true,start+150u);
+        update=Grip(state,false,false,false,true,start+270u);
         Expect(update.release && update.lastValidPoseFallback,"later action loss cannot erase already-confirmed release");
     }
     state={}; grenade::ObserveDisabledGrip(&state,true,true);
@@ -200,31 +208,36 @@ void BindingAvailability()
     // look like a fresh recovery every time it is pressed.
     sample(1,0,false,0);
     Expect(sample(1,1,false,1).grabPressed,"supported primary works with unsupported alternate");
-    Expect(sample(1,0,true,2).release,"supported primary releases with unsupported alternate");
-    Expect(sample(1,1,false,3).grabPressed,"supported primary remains usable on repeated grab");
-    Expect(!sample(2,0,true,4).release,"losing held primary cannot release via neutral available alternate");
+    Expect(sample(1,0,true,2).releaseStarted,"supported primary confirms release with unsupported alternate");
+    Expect(sample(1,0,true,122).release,"supported primary releases after debounce");
+    Expect(sample(1,1,false,123).grabPressed,"supported primary remains usable on repeated grab");
+    Expect(!sample(2,0,true,124).release,"losing held primary cannot release via neutral available alternate");
     Expect(!sample(2,0,true,5000).release,"unknown held owner cannot time out as fake release");
     Expect(!sample(3,1,true,5001).release,"held primary recovery preserves grenade");
-    Expect(sample(3,0,true,5002).release,"recovered owner reports real release");
+    Expect(sample(3,0,true,5002).releaseStarted,"recovered owner reports real release");
+    Expect(sample(3,0,true,5122).release,"recovered owner release commits after debounce");
     // Reappearing held alternate was never an accepted owner and cannot grab.
     bindings={}; grip={}; sample(1,0,false,0);
     Expect(!sample(3,2,false,1).grabPressed,"newly available held alternate cannot manufacture pickup");
     sample(3,0,false,2);
     Expect(sample(3,2,false,3).grabPressed,"available alternate rearms after a real neutral state");
     Expect(!sample(1,0,true,4).release,"alternate owner loss cannot be masked by available primary");
-    Expect(sample(3,0,true,5).release,"alternate owner's confirmed release remains usable");
+    Expect(sample(3,0,true,5).releaseStarted,"alternate owner's confirmed release remains usable");
+    Expect(sample(3,0,true,125).release,"alternate owner release commits after debounce");
     // Two valid held owners implement OR: one released slot cannot release
     // the grenade while the other remains held or is temporarily unknown.
     bindings={}; grip={}; sample(3,0,false,0);
     Expect(sample(3,1,false,1).grabPressed,"primary grabs after both slots neutral");
     Expect(!sample(3,3,true,2).release,"second held alternative preserves grenade");
     Expect(!sample(3,2,true,3).release,"first released alternative does not release second owner");
-    Expect(sample(3,0,true,4).release,"all confirmed released alternatives release grenade");
+    Expect(sample(3,0,true,4).releaseStarted,"all alternatives must release before debounce starts");
+    Expect(sample(3,0,true,124).release,"all confirmed released alternatives release grenade");
     // Returning owner released is a known release, even if another never-held
     // alternative remains unsupported throughout.
     bindings={}; grip={}; sample(1,0,false,0); sample(1,1,false,1);
     Expect(!sample(0,0,true,2).release,"all sources becoming unavailable cannot release");
-    Expect(sample(1,0,true,3).release,"active false owner state after loss is a genuine release");
+    Expect(sample(1,0,true,3).releaseStarted,"active false owner state after loss is a genuine release");
+    Expect(sample(1,0,true,123).release,"confirmed owner release commits after debounce");
     bindings={};
     auto binding=grenade::ResolveObjectBindings(&bindings,1,1,1);
     Expect(!binding.held,"startup-held source must first be released");
@@ -243,11 +256,83 @@ void BindingAvailability()
                "chord availability must use three-valued AND, not availability AND");
     }
 }
+
+void PouchesAndOwnership()
+{
+    const float frag[3]={6.2f,7.15f,-26.0f};
+    const float tactical[3]={7.2f,-4.8f,-10.0f};
+    Expect(grenade::FindPouch(frag,true,frag,tactical)==grenade::Pouch::Frag,
+           "rendered belt anchor selects frag");
+    Expect(grenade::FindPouch(tactical,true,frag,tactical)==grenade::Pouch::Tactical,
+           "rendered chest anchor selects tactical");
+    const float distantHand[3]={40,30,0};
+    Expect(grenade::FindPouch(distantHand,true,frag,tactical)==grenade::Pouch::None,
+           "a hand far from both pouches cannot grab");
+    Expect(!grenade::CanReturnToPouch(distantHand,true,frag),
+           "throwing hand away from pouch cannot return even if the other hand rests at the belt");
+    Expect(grenade::CanReturnToPouch(frag,true,frag),"holding hand can return its frag");
+    Expect(grenade::CanReturnToPouch(tactical,true,tactical),"holding hand can return its tactical");
+    Expect(!grenade::CanReturnToPouch(frag,true,tactical),"frag pouch cannot stow a tactical");
+    Expect(!grenade::CanReturnToPouch(tactical,false,tactical),"lost tracking cannot infer a pouch return");
+    Expect(grenade::FindPouch(frag,false,frag,tactical)==grenade::Pouch::None,
+           "lost tracking cannot infer a pickup");
+    const float closeFrag[3]={0,0,0}, closeTactical[3]={0,0,10};
+    const float nearerFrag[3]={0,0,3}, nearerTactical[3]={0,0,7};
+    Expect(grenade::FindPouch(nearerFrag,true,closeFrag,closeTactical)==grenade::Pouch::Frag,
+           "overlapping volumes choose the nearer frag instead of unconditional tactical priority");
+    Expect(grenade::FindPouch(nearerTactical,true,closeFrag,closeTactical)==grenade::Pouch::Tactical,
+           "overlapping volumes choose the nearer tactical");
+    for(float invalid:{std::numeric_limits<float>::quiet_NaN(),std::numeric_limits<float>::infinity()})
+    {
+        const float bad[3]={invalid,0,0};
+        Expect(grenade::FindPouch(bad,true,frag,tactical)==grenade::Pouch::None,
+               "nonfinite tracking cannot select a pouch");
+        Expect(!grenade::CanReturnToPouch(bad,true,frag),"nonfinite tracking cannot stow a grenade");
+    }
+    Expect(grenade::FindPouch(nullptr,true,frag,tactical)==grenade::Pouch::None,
+           "null pose fails closed");
+
+    for(bool weaponHand:{false,true})
+    {
+        grenade::GripState owner, other;
+        Grip(owner,false,true,true,false,0); Grip(other,false,true,true,false,0);
+        Expect(Grip(owner,true,true,true,false,1).grabPressed,"either hand can acquire ownership");
+        Grip(other,true,true,true,false,2);
+        Grip(other,false,true,true,false,3);
+        Expect(!Grip(owner,true,true,true,true,200).release,"other hand release cannot throw held item");
+        Expect(!Grip(owner,false,false,true,true,300).release,"inactive squeeze cannot throw for either owner");
+        Expect(!Grip(owner,false,false,false,true,2000).release,"tracking/input loss cannot expire into a throw");
+        Grip(owner,true,true,true,true,2001);
+        Expect(Grip(owner,false,true,true,true,2002).releaseStarted,"recovered owner can intentionally release");
+        Expect(Grip(owner,false,true,true,true,2122).release,
+               weaponHand ? "weapon-hand release commits" : "offhand release commits");
+    }
+}
+
+void NativeReturnRequests()
+{
+    for(std::uint32_t start:{0u,100u,0xfffffff0u})
+    {
+        grenade::ReturnRequest request;
+        Expect(!request.Matches(4,start),"no return request cannot cancel native grenades");
+        request.weaponIndex=4; request.firstCommandTime=start;
+        Expect(!request.Matches(4,start-1u),"commands before pouch return are unaffected");
+        Expect(!request.Matches(5,start),"return cannot cancel a different grenade type");
+        Expect(request.Matches(4,start),"return command cancels native preparation");
+        Expect(request.Matches(4,start),"prediction and server both see the same cancellation");
+        Expect(request.Matches(4,start+2999u),"delayed native state observes the return");
+        Expect(!request.Matches(4,start+3000u),"expired return cannot cancel future native input");
+        request.closed=true; request.nextGrabCommandTime=start+200u;
+        Expect(request.Matches(4,start+199u),"replayed return commands still cancel after another draw");
+        Expect(!request.Matches(4,start+200u),"new pickup's command cannot cancel its grenade");
+        Expect(!request.Matches(4,start+201u),"new grenade can subsequently be thrown");
+    }
+}
 } // namespace
 
 int main()
 {
-    Geometry(); GripTracking(); BindingAvailability();
+    Geometry(); GripTracking(); BindingAvailability(); PouchesAndOwnership(); NativeReturnRequests();
     std::printf("Grenade interaction tests: %d checks, %d failures.\n",checks,failures);
     return failures ? 1 : 0;
 }
