@@ -843,7 +843,7 @@ void __cdecl CL_Frame(int localClientNum, int msec)
                 {
                     s_vrTestMapLaunched = true;
                     Com_Printf(0, "[VR] Sandbox test range active: auto-loading Killhouse firing range (spdevmap killhouse).\n");
-                    Cbuf_AddText(0, "set sv_cheats 1\nspdevmap killhouse\n");
+                    Cbuf_AddText(0, "set thereisacow 1337\nset sv_cheats 1\nspdevmap killhouse\n");
                 }
             }
             else if (clientUIActives[0].connectionState == CA_ACTIVE)
@@ -852,7 +852,7 @@ void __cdecl CL_Frame(int localClientNum, int msec)
                 {
                     s_vrTestCheatsApplied = true;
                     Com_Printf(0, "[VR] Sandbox test range active: unlocking full weapon armory, infinite ammo, and godmode.\n");
-                    Cbuf_AddText(0, "set sv_cheats 1\ngod\n");
+                    Cbuf_AddText(0, "thereisacow 1337\nset sv_cheats 1\ngive all\ngive ammo\ngod\n");
                 }
             }
         }

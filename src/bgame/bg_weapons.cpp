@@ -2186,9 +2186,9 @@ void __cdecl PM_Weapon_CheckForReload(pmove_t *pm)
                 VR_ManualMagazineReloadSuppressesAutomaticReload(
                     ps->weapon);
 
-            if (reloadRequested &&
-                VR_IsManualMagazineReloadCommitActive(
-                    ps->weapon) &&
+            if ((reloadRequested ||
+                 VR_IsManualMagazineReloadCommitActive(
+                     ps->weapon)) &&
                 PM_Weapon_AllowReload(ps))
             {
                 ps->weaponShotCount = 0;
@@ -2205,6 +2205,10 @@ void __cdecl PM_Weapon_CheckForReload(pmove_t *pm)
                 // first-person hand animation.  Perform the same ammo move
                 // deterministically in prediction and server simulation.
                 PM_ReloadClip(ps);
+
+                PM_AddEvent(
+                    ps,
+                    EV_RELOAD_ADDAMMO);
 
                 ps->weaponTime = 0;
                 ps->weaponDelay = 0;

@@ -281,47 +281,5 @@ void __cdecl GScr_LoadScripts(const char *mapname, ScriptFunctions *functions)
         GScr_LoadScriptsForEntities(functions); // LWSS: function changed to register functions for `node_negotiation_begin`
     }
 
-    const dvar_s* vrTestDvar = Dvar_FindVar("vr_testMode");
-    const char* const vrTestEnv = std::getenv("KISAK_VR_TEST_MODE");
-    const bool testMode = (vrTestDvar && vrTestDvar->current.enabled) ||
-                          (vrTestEnv && (vrTestEnv[0] == '1' || vrTestEnv[0] == 't' || vrTestEnv[0] == 'T'));
-    if (testMode)
-    {
-        static const char* const s_armoryWeapons[] = {
-            "m4_grunt", "m4_grenadier", "m4_silencer",
-            "m16_basic", "m16_grenadier", "m16_acog", "m16_reflex",
-            "ak47", "ak47_grenadier", "ak47_silencer",
-            "g36c", "g36c_reflex", "g36c_silencer",
-            "g3", "g3_silencer",
-            "m14", "m14_woodland", "m14_scoped",
-            "mp5", "mp5_silencer", "mp5sd",
-            "ak74u", "ak74u_silencer",
-            "skorpion", "skorpion_silencer",
-            "mini_uzi", "mini_uzi_silencer",
-            "p90", "p90_silencer",
-            "winchester1200", "winchest1200",
-            "m1014", "benelli_super_90",
-            "saw", "rpd", "m60e4", "m60_mg_setup",
-            "m40a3", "m40a3_camo",
-            "remington700",
-            "m21", "m21_woodland", "m21sd_woodland",
-            "dragunov",
-            "barrett", "m82",
-            "usp", "usp_silencer",
-            "m9", "beretta", "beretta_silencer",
-            "colt45", "colt1911", "colt1911_silencer",
-            "deserteagle", "desert_eagle", "desert_eagle_silver",
-            "rpg7", "at4",
-            "c4", "claymore",
-            "fraggrenade", "m67_grenade",
-            "flash_grenade", "m84_flashbang_grenade",
-            "smoke_grenade", "us_smoke_grenade"
-        };
-        for (const char* wName : s_armoryWeapons)
-        {
-            G_GetWeaponIndexForName(wName);
-        }
-    }
-
     Scr_PostCompileScripts();
 }
