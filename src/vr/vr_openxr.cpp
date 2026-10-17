@@ -1682,6 +1682,38 @@ const VrConfiguratorSettings& VR_GetConfiguratorSettings()
                 0.0f,
                 48.0f);
 
+        const char* const factionStr = std::getenv("KISAK_VR_PLAYER_SKIN_OVERRIDE");
+        if (factionStr && factionStr[0] != '\0')
+        {
+            g_vrPlayerFactionOverride = std::atoi(factionStr);
+        }
+
+        const char* const compassModeStr = std::getenv("KISAK_VR_COMPASS_MODE");
+        if (compassModeStr && compassModeStr[0] != '\0')
+        {
+            const int modeVal = std::atoi(compassModeStr);
+            if (modeVal >= 0 && modeVal <= 3)
+            {
+                g_vrCompassMode = static_cast<VrCompassMode>(modeVal);
+            }
+        }
+
+        const float wingspanInches = VR_ReadConfiguratorFloat(
+            "KISAK_VR_WINGSPAN_INCHES",
+            70.0f,
+            30.0f,
+            100.0f);
+        if (!g_vrTPoseTelemetry.valid)
+        {
+            g_vrTPoseTelemetry.wingspanInches = wingspanInches;
+            g_vrTPoseTelemetry.armLengthInches = wingspanInches * 0.42f;
+            g_vrTPoseTelemetry.shoulderWidthInches = wingspanInches * 0.26f;
+            g_vrTPoseTelemetry.standingEyeHeightInches = loaded.standingEyeHeightInches;
+            g_vrTPoseTelemetry.shoulderHeightInches = loaded.standingEyeHeightInches - 7.5f;
+            g_vrTPoseTelemetry.rigScaleFactor = std::clamp(loaded.standingEyeHeightInches / 60.0f, 0.75f, 1.35f);
+            g_vrTPoseTelemetry.valid = true;
+        }
+
         loaded.hudLayout.safeX =
             VR_ReadConfiguratorClampedFloat(
                 "KISAK_VR_HUD_SAFE_X",
@@ -3484,6 +3516,44 @@ struct VrScopeConstants
     float mapZ[4];
 };
 
+static void VR_QuatToMatrix3x3(const XrQuaternionf& q, float m[3][3])
+{
+    const float x = q.x, y = q.y, z = q.z, w = q.w;
+    m[0][0] = 1.0f - 2.0f * (y * y + z * z);
+    m[0][1] = 2.0f * (x * y - z * w);
+    m[0][2] = 2.0f * (x * z + y * w);
+
+    m[1][0] = 2.0f * (x * y + z * w);
+    m[1][1] = 1.0f - 2.0f * (x * x + z * z);
+    m[1][2] = 2.0f * (y * z - x * w);
+
+    m[2][0] = 2.0f * (x * z - y * w);
+    m[2][1] = 2.0f * (y * z + x * w);
+    m[2][2] = 1.0f - 2.0f * (x * x + y * y);
+}
+
+static void VR_MultiplyMatrix3x3(const float a[3][3], const float b[3][3], float out[3][3])
+{
+    for (int r = 0; r < 3; ++r)
+    {
+        for (int c = 0; c < 3; ++c)
+        {
+            out[r][c] = a[r][0] * b[0][c] + a[r][1] * b[1][c] + a[r][2] * b[2][c];
+        }
+    }
+}
+
+static void VR_TransposeMatrix3x3(const float in[3][3], float out[3][3])
+{
+    for (int r = 0; r < 3; ++r)
+    {
+        for (int c = 0; c < 3; ++c)
+        {
+            out[r][c] = in[c][r];
+        }
+    }
+}
+
 struct VrCompositorConstants
 {
     float settings[4];
@@ -3504,6 +3574,17 @@ struct VrCompositorConstants
     // z: elapsed time in seconds for procedural animation
     // w: eye aspect ratio (width / height)
     float spatialEnvironment[4];
+
+    // Latched head-to-live ray relative rotation matrix for static world quad
+    float headRelRotRow0[4];
+    float headRelRotRow1[4];
+    float headRelRotRow2[4];
+
+    // Live head orientation matrix for full 360-degree atmospheric smoke
+    float liveHeadRotRow0[4];
+    float liveHeadRotRow1[4];
+    float liveHeadRotRow2[4];
+    float spatialPadding[4];
 };
 
 struct VrFsrConstants
@@ -3542,6 +3623,17 @@ cbuffer VrCompositorConstants : register(b1)
     // z: elapsed time in seconds
     // w: aspect ratio
     float4 vrSpatialEnvironment;
+
+    // Latched head-to-live ray relative rotation matrix for static world quad
+    float4 vrHeadRelRotRow0;
+    float4 vrHeadRelRotRow1;
+    float4 vrHeadRelRotRow2;
+
+    // Live head orientation matrix for full 360-degree atmospheric smoke
+    float4 vrLiveHeadRotRow0;
+    float4 vrLiveHeadRotRow1;
+    float4 vrLiveHeadRotRow2;
+    float4 vrSpatialPadding;
 };
 
 cbuffer VrFsrConstants : register(b2)
@@ -3668,92 +3760,79 @@ float3 VR_Render3DVolumetricSmokeMenu(float2 pixelPos, float2 inputUv)
 
     const float2 roomUv = eyeUv - vrFixedScopeZoom.xy;
     const float2 p = roomUv * float2(aspect, 1.0f);
-    const float3 ray = normalize(float3(p, 1.48f));
+    const float3 rayEye = normalize(float3(p.x, -p.y, 1.48f));
 
-    // Multi-layered volumetric smoke/fog styled to match the CoD4 main loading screen
-    // (deep tactical charcoal-emerald atmosphere with rolling phosphor-green smoke plumes)
-    float3 q1 = ray * 2.15f + float3(time * 0.065f, time * 0.042f, -time * 0.035f);
+    // Full 360-degree atmospheric smoke using live head orientation
+    float3 rayWorld = rayEye;
+    if (dot(vrLiveHeadRotRow0.xyz, vrLiveHeadRotRow0.xyz) > 0.5f)
+    {
+        rayWorld = float3(
+            dot(vrLiveHeadRotRow0.xyz, rayEye),
+            dot(vrLiveHeadRotRow1.xyz, rayEye),
+            dot(vrLiveHeadRotRow2.xyz, rayEye));
+    }
+
+    // Multi-layered volumetric smoke wrapping 360 degrees around the player
+    float3 q1 = rayWorld * 2.15f + float3(time * 0.065f, time * 0.042f, -time * 0.035f);
     float n1 = sin(q1.x * 2.1f + sin(q1.y * 2.7f + q1.z * 1.5f));
     float n2 = cos(q1.y * 3.2f + sin(q1.z * 2.3f + q1.x * 1.2f));
     float n3 = sin(q1.z * 3.6f + cos(q1.x * 2.5f + q1.y * 1.9f));
     float smokeLow = (n1 + n2 + n3) * 0.333f * 0.5f + 0.5f;
 
-    float3 q2 = ray * 4.6f - float3(time * 0.052f, -time * 0.038f, time * 0.044f);
+    float3 q2 = rayWorld * 4.6f - float3(time * 0.052f, -time * 0.038f, time * 0.044f);
     float n4 = sin(q2.x * 3.4f + cos(q2.y * 4.0f + n1 * 0.8f));
     float n5 = cos(q2.y * 4.4f + sin(q2.z * 3.2f + n2 * 0.8f));
     float smokeMid = (n4 + n5) * 0.5f * 0.5f + 0.5f;
 
-    float3 q3 = ray * 8.4f + float3(-time * 0.035f, time * 0.075f, time * 0.025f);
+    float3 q3 = rayWorld * 8.4f + float3(-time * 0.035f, time * 0.075f, time * 0.025f);
     float n6 = sin(q3.x * 4.8f - sin(q3.y * 5.1f + q3.z * 2.7f));
     float smokeFine = n6 * 0.5f + 0.5f;
 
     float totalSmoke = saturate(smokeLow * 0.52f + smokeMid * 0.33f + smokeFine * 0.15f);
-    float billow = smoothstep(0.22f, 0.88f, totalSmoke);
+    float billow = smoothstep(0.20f, 0.85f, totalSmoke);
 
-    // Miniature theater architectural enclosure around the recessed screen
-    const float2 screenP = (eyeUv - vrFixedScopeSettings.zw) * float2(aspect, 1.0f);
-    const float curve = screenP.x * screenP.x * 0.055f;
-    const float2 curvedP = float2(screenP.x * (1.0f + curve), screenP.y * (1.0f + curve));
-    // Pushed further away into a dedicated miniature theater stage
-    const float2 screenHalfExtents = float2(0.225f, 0.16875f);
-    const float2 screenNorm = curvedP / screenHalfExtents;
+    // Authentic Call of Duty 4 Main Menu color scheme:
+    // Charcoal gunmetal, rolling tactical phosphor-emerald smoke, and warm amber highlights stretching 360 degrees
+    const float3 smokeBase = float3(0.012f, 0.015f, 0.018f);
+    const float3 smokeEmerald = float3(0.022f, 0.036f, 0.028f);
+    const float3 smokeAmber = float3(0.050f, 0.042f, 0.028f);
+    const float3 ambientSmoke = lerp(smokeBase, lerp(smokeEmerald, smokeAmber, billow * 0.42f), totalSmoke * 0.88f);
 
-    const float sideWallDist = max(0.0f, abs(p.x) - 0.24f);
-    const float sideWallRibs = 0.5f + 0.5f * cos(sideWallDist * 52.0f);
-    const float floorGradient = saturate((p.y - 0.14f) / 0.42f);
-    const float floorAisleSteps = (0.5f + 0.5f * sin(p.y * 68.0f)) * smoothstep(0.26f, 0.04f, abs(p.x));
-    const float ceilingGradient = saturate((-p.y - 0.15f) / 0.42f);
-    const float prosceniumDist = max(abs(screenNorm.x) - 1.02f, abs(screenNorm.y) - 1.02f);
-    const float prosceniumArch = exp(-abs(prosceniumDist) * 18.0f);
-
-    // Authentic Call of Duty 4 Main Menu atmosphere:
-    // Dark gunmetal slate, charcoal shadow tones, and rolling tactical volumetric smoke with subtle warm amber highlights
-    const float3 theaterBase = float3(0.012f, 0.014f, 0.017f);
-    const float3 theaterArchitecture =
-        float3(0.020f, 0.024f, 0.028f) * (sideWallRibs * smoothstep(0.20f, 0.52f, abs(p.x)) * 0.65f) +
-        float3(0.015f, 0.018f, 0.022f) * (floorGradient * (0.55f + 0.45f * floorAisleSteps)) +
-        float3(0.012f, 0.015f, 0.018f) * (ceilingGradient * 0.45f) +
-        float3(0.035f, 0.032f, 0.025f) * (prosceniumArch * 0.70f);
-
-    // Overhead projector beam & volumetric haze cone through the miniature theater
-    const float beamCone = exp(-pow(abs(p.x) / max(0.16f, 0.36f - p.y * 0.35f), 2.0f) * 1.85f) *
-                           smoothstep(0.45f, -0.38f, p.y);
-    const float3 smokeCharcoal = float3(0.022f, 0.026f, 0.030f);
-    const float3 smokeWarmAmber = float3(0.052f, 0.045f, 0.032f);
-    const float3 smokeColor = lerp(smokeCharcoal, smokeWarmAmber, billow * 0.45f) *
-                              (0.58f + 0.65f * totalSmoke + 0.42f * beamCone);
-
-    const float radialDepth = 1.0f - smoothstep(0.18f, 0.96f, length(roomUv));
-    const float scanline = 0.965f + 0.035f * sin(pixelPos.y * 2.1f);
-    float3 volumetricTheater = (theaterBase + theaterArchitecture + smokeColor * (0.45f + 0.55f * radialDepth)) * scanline;
-
-    float3 finalColor = volumetricTheater;
-    if (abs(screenNorm.x) <= 1.0f && abs(screenNorm.y) <= 1.0f)
+    // Static floating world menu quad (layer is latched in world space by compositor)
+    const float3 rayRel = rayEye;
+    float3 finalColor = ambientSmoke;
+    if (rayRel.z > 0.25f)
     {
-        const float2 menuUv = screenNorm * 0.5f + float2(0.5f, 0.5f);
-        const float2 menuSrcUv = float2(
-            menuUv.x * 0.5f * vrCompositorSettings.y,
-            menuUv.y);
-        const float4 uiSample = capturedFrame.Sample(capturedSampler, menuSrcUv);
+        const float t = 1.48f / rayRel.z;
+        const float2 hitPoint = float2(rayRel.x, -rayRel.y) * t;
+        const float2 screenHalfExtents = float2(0.36f, 0.27f);
+        const float2 screenNorm = hitPoint / screenHalfExtents;
 
-        const float uiLuma = max(uiSample.r, max(uiSample.g, uiSample.b));
-        const float edgeDist = max(abs(screenNorm.x), abs(screenNorm.y));
-        const float frameFade = smoothstep(1.00f, 0.968f, edgeDist);
+        if (abs(screenNorm.x) <= 1.0f && abs(screenNorm.y) <= 1.0f)
+        {
+            const float2 menuUv = screenNorm * 0.5f + float2(0.5f, 0.5f);
+            const float2 menuSrcUv = float2(
+                menuUv.x * 0.5f * vrCompositorSettings.y,
+                menuUv.y);
+            const float4 uiSample = capturedFrame.Sample(capturedSampler, menuSrcUv);
 
-        // Gently bathe the recessed theater screen in volumetric room fog across dark regions
-        const float3 screenSmokeOverlay =
-            smokeColor * (0.28f + 0.22f * billow) * (1.0f - saturate(uiLuma * 2.2f));
-        const float3 panelColor = uiSample.rgb + screenSmokeOverlay;
-        finalColor = lerp(volumetricTheater, panelColor, frameFade);
+            const float edgeDist = max(abs(screenNorm.x), abs(screenNorm.y));
+            const float frameFade = smoothstep(1.00f, 0.970f, edgeDist);
 
-        const float rim = (1.0f - smoothstep(0.0f, 0.03f, abs(edgeDist - 0.985f))) * 0.45f;
-        finalColor += float3(0.18f, 0.35f, 0.22f) * rim;
-    }
-    else
-    {
-        //Foreground volumetric smoke wisps drifting in front of the proscenium stage
-        const float stageProximity = exp(-max(0.0f, prosceniumDist) * 4.5f);
-        finalColor += smokeColor * (0.22f * billow * stageProximity);
+            const float3 screenSmokeOverlay =
+                ambientSmoke * (0.16f + 0.14f * billow) * (1.0f - saturate(max(uiSample.r, max(uiSample.g, uiSample.b)) * 2.0f));
+            const float3 panelColor = uiSample.rgb + screenSmokeOverlay;
+            finalColor = lerp(ambientSmoke, panelColor, frameFade);
+
+            const float rim = (1.0f - smoothstep(0.0f, 0.025f, abs(edgeDist - 0.985f))) * 0.38f;
+            finalColor += float3(0.18f, 0.35f, 0.22f) * rim;
+        }
+        else
+        {
+            const float screenDist = max(abs(screenNorm.x) - 1.0f, abs(screenNorm.y) - 1.0f);
+            const float screenGazeHalo = exp(-max(0.0f, screenDist) * 3.8f) * 0.16f;
+            finalColor += float3(0.02f, 0.035f, 0.025f) * screenGazeHalo;
+        }
     }
 
     return finalColor;
@@ -3764,66 +3843,51 @@ float3 VR_Render3DVirtualTheaterCutscene(float2 pixelPos, float2 inputUv)
 {
     const float2 eyeUv = pixelPos * vrCompositorSettings.zw;
     const float aspect = max(vrSpatialEnvironment.w, 0.5f);
-    const float2 p = (eyeUv - vrFixedScopeSettings.zw) * float2(aspect, 1.0f);
-    const float2 roomP = (eyeUv - vrFixedScopeZoom.xy) * float2(aspect, 1.0f);
+    const float2 roomUv = eyeUv - vrFixedScopeZoom.xy;
+    const float2 p = roomUv * float2(aspect, 1.0f);
+    const float3 rayEye = normalize(float3(p.x, -p.y, 1.48f));
 
-    const float curve = p.x * p.x * 0.14f;
-    const float2 curvedP = float2(p.x * (1.0f + curve), p.y * (1.0f + curve));
-    const float2 screenHalfExtents = float2(0.38f, 0.285f);
-    const float2 screenNorm = curvedP / screenHalfExtents;
-
-    const bool insideScreen =
-        abs(screenNorm.x) <= 1.0f &&
-        abs(screenNorm.y) <= 1.0f;
-
-    const float2 movieUv = screenNorm * 0.5f + float2(0.5f, 0.5f);
-    const float2 clampedMovieUv = clamp(movieUv, float2(0.08f, 0.18f), float2(0.92f, 0.82f));
-    const float4 ambilight = capturedFrame.Sample(
-        capturedSampler,
-        float2(clampedMovieUv.x * 0.5f * vrCompositorSettings.y, clampedMovieUv.y));
-
-    if (insideScreen)
-    {
-        const float4 videoSample = capturedFrame.Sample(
-            capturedSampler,
-            float2(movieUv.x * 0.5f * vrCompositorSettings.y, movieUv.y));
-
-        const float edgeDist = max(abs(screenNorm.x), abs(screenNorm.y));
-        const float bezelHighlight =
-            (1.0f - smoothstep(0.0f, 0.025f, abs(edgeDist - 0.99f))) * 0.40f;
-
-        return videoSample.rgb * (1.0f - bezelHighlight) +
-               float3(0.28f, 0.30f, 0.35f) * bezelHighlight;
-    }
-
-    float ceilingGlow = 0.0f;
-    if (roomP.y < -screenHalfExtents.y)
-    {
-        float d = (-roomP.y - screenHalfExtents.y);
-        ceilingGlow = exp(-d * 4.2f) * 0.45f;
-    }
-
-    float wallGlow = 0.0f;
-    if (abs(roomP.x) > screenHalfExtents.x)
-    {
-        float d = abs(roomP.x) - screenHalfExtents.x;
-        float ribbing = 0.85f + 0.15f * cos(roomP.y * 50.0f);
-        wallGlow = exp(-d * 3.6f) * 0.55f * ribbing;
-    }
-
-    float floorGlow = 0.0f;
-    if (roomP.y > screenHalfExtents.y)
-    {
-        float d = (roomP.y - screenHalfExtents.y);
-        float steps = 0.88f + 0.12f * sin(d * 40.0f);
-        floorGlow = exp(-d * 3.2f) * 0.40f * steps;
-    }
-
-    const float beamHaze = exp(-length(roomP) * 1.8f) * 0.07f;
-    const float totalBounce = ceilingGlow + wallGlow + floorGlow + beamHaze;
+    const float3 rayRel = rayEye;
     const float3 theaterBase = float3(0.012f, 0.014f, 0.018f);
+    float3 finalColor = theaterBase;
 
-    return theaterBase + ambilight.rgb * (totalBounce * 0.70f);
+    if (rayRel.z > 0.20f)
+    {
+        const float t = 1.48f / rayRel.z;
+        const float2 hitPoint = float2(rayRel.x, -rayRel.y) * t;
+        const float2 screenHalfExtents = float2(0.42f, 0.315f);
+        const float2 screenNorm = hitPoint / screenHalfExtents;
+
+        const bool insideScreen =
+            abs(screenNorm.x) <= 1.0f &&
+            abs(screenNorm.y) <= 1.0f;
+
+        const float2 movieUv = screenNorm * 0.5f + float2(0.5f, 0.5f);
+        const float2 clampedMovieUv = clamp(movieUv, float2(0.08f, 0.18f), float2(0.92f, 0.82f));
+        const float4 ambilight = capturedFrame.Sample(
+            capturedSampler,
+            float2(clampedMovieUv.x * 0.5f * vrCompositorSettings.y, clampedMovieUv.y));
+
+        if (insideScreen)
+        {
+            const float4 videoSample = capturedFrame.Sample(
+                capturedSampler,
+                float2(movieUv.x * 0.5f * vrCompositorSettings.y, movieUv.y));
+
+            const float edgeDist = max(abs(screenNorm.x), abs(screenNorm.y));
+            const float bezelHighlight =
+                (1.0f - smoothstep(0.0f, 0.025f, abs(edgeDist - 0.99f))) * 0.40f;
+
+            return videoSample.rgb * (1.0f - bezelHighlight) +
+                   float3(0.28f, 0.30f, 0.35f) * bezelHighlight;
+        }
+
+        const float screenDist = max(abs(screenNorm.x) - 1.0f, abs(screenNorm.y) - 1.0f);
+        const float ambilightBounce = exp(-max(0.0f, screenDist) * 2.8f) * 0.55f;
+        finalColor = theaterBase + ambilight.rgb * ambilightBounce;
+    }
+
+    return finalColor;
 }
 
 float4 PSMain(PixelInput input) : SV_TARGET
@@ -5678,6 +5742,53 @@ void VR_UpdateCompositorConstantsForEye(
             opticalCenterX;
         constants.fixedScopeZoom[1] =
             opticalCenterY;
+
+        float rLive[3][3] = { {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f} };
+        float rLatched[3][3] = { {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f} };
+        float rLatchedT[3][3] = { {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f} };
+        float rRel[3][3] = { {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f} };
+
+        if (eyeIndex < g_vrViews.size())
+        {
+            VR_QuatToMatrix3x3(g_vrViews[eyeIndex].pose.orientation, rLive);
+        }
+
+        if (s_staticWorldCanvasActive && eyeIndex < kVrStereoEyeCount)
+        {
+            VR_QuatToMatrix3x3(s_latchedStaticCanvasPose[eyeIndex].orientation, rLatched);
+            VR_TransposeMatrix3x3(rLatched, rLatchedT);
+            VR_MultiplyMatrix3x3(rLatchedT, rLive, rRel);
+        }
+
+        constants.liveHeadRotRow0[0] = rLive[0][0];
+        constants.liveHeadRotRow0[1] = rLive[0][1];
+        constants.liveHeadRotRow0[2] = rLive[0][2];
+        constants.liveHeadRotRow0[3] = 0.0f;
+
+        constants.liveHeadRotRow1[0] = rLive[1][0];
+        constants.liveHeadRotRow1[1] = rLive[1][1];
+        constants.liveHeadRotRow1[2] = rLive[1][2];
+        constants.liveHeadRotRow1[3] = 0.0f;
+
+        constants.liveHeadRotRow2[0] = rLive[2][0];
+        constants.liveHeadRotRow2[1] = rLive[2][1];
+        constants.liveHeadRotRow2[2] = rLive[2][2];
+        constants.liveHeadRotRow2[3] = 0.0f;
+
+        constants.headRelRotRow0[0] = rRel[0][0];
+        constants.headRelRotRow0[1] = rRel[0][1];
+        constants.headRelRotRow0[2] = rRel[0][2];
+        constants.headRelRotRow0[3] = 0.0f;
+
+        constants.headRelRotRow1[0] = rRel[1][0];
+        constants.headRelRotRow1[1] = rRel[1][1];
+        constants.headRelRotRow1[2] = rRel[1][2];
+        constants.headRelRotRow1[3] = 0.0f;
+
+        constants.headRelRotRow2[0] = rRel[2][0];
+        constants.headRelRotRow2[1] = rRel[2][1];
+        constants.headRelRotRow2[2] = rRel[2][2];
+        constants.headRelRotRow2[3] = 0.0f;
     }
 
     D3D11_MAPPED_SUBRESOURCE mapped = {};
@@ -12730,6 +12841,20 @@ void VR_ApplyControllerInputState(
         g_vrMenuBackHeld =
             isHeld(VrInput::Action::MenuBack);
 
+        const bool menuRecenterHeld =
+            isHeld(VrInput::Action::Melee);
+        static bool s_menuRecenterWasHeld = false;
+        if (menuRecenterHeld && !s_menuRecenterWasHeld)
+        {
+            if (Key_IsCatcherActive(0, 0x10) || clientUIActives[0].connectionState < CA_ACTIVE)
+            {
+                Com_Printf(0, "[VR] Right stick clicked in menu; recentering static canvas in front of gaze.\n");
+                s_staticWorldCanvasActive = false;
+                s_openVrStaticCanvasActive = false;
+            }
+        }
+        s_menuRecenterWasHeld = menuRecenterHeld;
+
         openPauseMenu =
             g_vrLeftMenuHeld &&
             !g_vrLeftMenuWasHeld;
@@ -14574,6 +14699,11 @@ void VR_PollEvents()
 
             case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
                 VR_LogCurrentControllerProfiles();
+                break;
+
+            case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
+                Com_Printf(0, "[VR] Reference space change pending; resetting static world canvas latch.\n");
+                s_staticWorldCanvasActive = false;
                 break;
 
             default:
@@ -17442,24 +17572,28 @@ void VR_UpdateManualMagazineReload(
                 loadedMagazineDelta[2] * loadedMagazineDelta[2]);
 
         // Method 1: Manually grabbing the loaded clip from the gun
-        if (canReload &&
+        const bool canGrabLoaded =
+            canReload &&
             g_vrManualMagazineReload.stage ==
                 VrManualMagazineReloadStage::Ready &&
-            squeezePressedEdge &&
+            (squeezePressedEdge || (leftSqueezeHeld && !g_vrLeftControllerForegripPressed)) &&
             g_vrLeftControllerForegripPoseValid &&
-            loadedMagazineDistance <= configurable.reloadInsertRadius * 1.45f)
+            loadedMagazineDistance <= configurable.reloadInsertRadius * 1.45f;
+
+        if (canGrabLoaded)
         {
             g_vrManualMagazineReload.stage =
                 VrManualMagazineReloadStage::HoldingLoaded;
             g_vrManualMagazineReload.loadedMagazineStillInWeapon = false;
             g_vrManualMagazineReload.heldPoseValid = true;
-            std::memcpy(
-                g_vrManualMagazineReload.heldOrigin,
-                leftGripWorld,
-                sizeof(g_vrManualMagazineReload.heldOrigin));
+            for (int c = 0; c < 3; ++c)
+            {
+                g_vrManualMagazineReload.heldOrigin[c] =
+                    leftGripWorld[c] - 3.0f * leftGripWorldAxis[2][c];
+            }
             std::memcpy(
                 g_vrManualMagazineReload.heldAxis,
-                magazineWellAxis,
+                leftGripWorldAxis,
                 sizeof(g_vrManualMagazineReload.heldAxis));
             g_vrLeftControllerForegripPressed = false;
             g_vrTwoHandWeaponTargetActive = false;
@@ -17471,10 +17605,11 @@ void VR_UpdateManualMagazineReload(
         {
             if (g_vrLeftControllerForegripPoseValid)
             {
-                std::memcpy(
-                    g_vrManualMagazineReload.heldOrigin,
-                    leftGripWorld,
-                    sizeof(g_vrManualMagazineReload.heldOrigin));
+                for (int c = 0; c < 3; ++c)
+                {
+                    g_vrManualMagazineReload.heldOrigin[c] =
+                        leftGripWorld[c] - 3.0f * leftGripWorldAxis[2][c];
+                }
                 std::memcpy(
                     g_vrManualMagazineReload.heldAxis,
                     leftGripWorldAxis,
@@ -17524,7 +17659,7 @@ void VR_UpdateManualMagazineReload(
              (canReload &&
               g_vrManualMagazineReload.stage ==
                   VrManualMagazineReloadStage::Ready)) &&
-            squeezePressedEdge &&
+            (squeezePressedEdge || (leftSqueezeHeld && !g_vrLeftControllerForegripPressed)) &&
             offhandGripAtMagazineHip)
         {
             const bool oldMagInWeapon =
@@ -17540,11 +17675,11 @@ void VR_UpdateManualMagazineReload(
             g_vrManualMagazineReload.heldPoseValid =
                 true;
 
-            std::memcpy(
-                g_vrManualMagazineReload.heldOrigin,
-                leftGripWorld,
-                sizeof(
-                    g_vrManualMagazineReload.heldOrigin));
+            for (int c = 0; c < 3; ++c)
+            {
+                g_vrManualMagazineReload.heldOrigin[c] =
+                    leftGripWorld[c] - 3.0f * leftGripWorldAxis[2][c];
+            }
 
             std::memcpy(
                 g_vrManualMagazineReload.heldAxis,
@@ -17562,11 +17697,11 @@ void VR_UpdateManualMagazineReload(
                 VrManualMagazineReloadStage::HoldingFresh &&
             g_vrLeftControllerForegripPoseValid)
         {
-            std::memcpy(
-                g_vrManualMagazineReload.heldOrigin,
-                leftGripWorld,
-                sizeof(
-                    g_vrManualMagazineReload.heldOrigin));
+            for (int c = 0; c < 3; ++c)
+            {
+                g_vrManualMagazineReload.heldOrigin[c] =
+                    leftGripWorld[c] - 3.0f * leftGripWorldAxis[2][c];
+            }
 
             std::memcpy(
                 g_vrManualMagazineReload.heldAxis,
@@ -18875,18 +19010,23 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
         }
 
         // Holster Tethering / Hold-to-Grip
-        // Releasing the grip button returns the firearm to its holster
+        // Firearm returns to holster only when neither hand is gripping it
         if (g_vrHoldToGripEnabled &&
             !g_vrPhysicalBodyRig.knifeDrawn &&
             !weaponHandHasGrenade &&
             !rightInSheath)
         {
-            const bool shouldBeHolstered = !rightGripHeld;
+            const bool gunGripped =
+                rightGripHeld ||
+                (leftGripHeld && (g_vrTwoHandWeaponTargetActive ||
+                                  g_vrLeftControllerForegripPressed ||
+                                  !g_vrPhysicalBodyRig.weaponHolstered));
+            const bool shouldBeHolstered = !gunGripped;
             if (shouldBeHolstered != g_vrPhysicalBodyRig.weaponHolstered)
             {
                 g_vrPhysicalBodyRig.weaponHolstered = shouldBeHolstered;
                 drawStowRightHaptic = true;
-                Com_Printf(0, "[VR][HOLSTER] %s\n", shouldBeHolstered ? "Grip released; weapon returned to holster." : "Grip engaged; weapon drawn from holster.");
+                Com_Printf(0, "[VR][HOLSTER] %s\n", shouldBeHolstered ? "Grips released; weapon returned to holster." : "Grip engaged; weapon drawn from holster.");
             }
         }
 
@@ -20174,15 +20314,44 @@ bool VR_UpdateManualGrenadeInput(
                 const bool otherHandTriggerOrGrip = g_vrManualGrenade.inWeaponHand
                     ? (g_vrLeftControllerSqueezePressedRaw || g_vrLeftControllerForegripPressed)
                     : (g_vrRightControllerSqueezePressedRaw || g_vrRightControllerAttackPressed);
-                if (!g_vrManualGrenade.pinPulled && otherHandValid && otherHandTriggerOrGrip)
+
+                const bool holdingHandTrigger = g_vrManualGrenade.inWeaponHand
+                    ? g_vrRightControllerAttackPressed
+                    : g_vrLeftControllerForegripPressed;
+
+                const float dHead = VR_Distance3(cameraOrigin, g_vrManualGrenade.heldOrigin);
+                const bool teethPinPull = (dHead <= 8.5f);
+
+                if (!g_vrManualGrenade.pinPulled)
                 {
-                    const float dOther = VR_Distance3(otherHandOrigin, g_vrManualGrenade.heldOrigin);
-                    if (dOther <= 6.0f)
+                    bool pulled = false;
+                    const char* method = "";
+                    if (otherHandValid && otherHandTriggerOrGrip)
+                    {
+                        const float dOther = VR_Distance3(otherHandOrigin, g_vrManualGrenade.heldOrigin);
+                        if (dOther <= 7.0f)
+                        {
+                            pulled = true;
+                            method = "offhand pinch";
+                        }
+                    }
+                    if (!pulled && teethPinPull)
+                    {
+                        pulled = true;
+                        method = "teeth bite";
+                    }
+                    if (!pulled && holdingHandTrigger)
+                    {
+                        pulled = true;
+                        method = "trigger spoon release";
+                    }
+
+                    if (pulled)
                     {
                         g_vrManualGrenade.pinPulled = true;
-                        VR_ApplyOffhandControllerHaptic(0.40f, 0.050f);
-                        VR_ApplyRightControllerWeaponHaptic(0.40f, 0.050f);
-                        Com_Printf(0, "[VR][GRENADE] Physical pin pulled with offhand! Spoon released, fuse live.\n");
+                        VR_ApplyOffhandControllerHaptic(0.60f, 0.080f);
+                        VR_ApplyRightControllerWeaponHaptic(0.60f, 0.080f);
+                        Com_Printf(0, "[VR][GRENADE] Physical pin pulled via %s! Spoon popped, fuse live.\n", method);
                     }
                 }
 
@@ -21359,26 +21528,11 @@ bool VR_ApplyRightControllerToWeaponPlacement(
                     frontManipulatedControllerAxis,
                     frontManipulatedWeaponAxis);
 
-                float pairSteeredWeaponAxis[3][3] = {};
-                kisak::vr::weapon_calibration::RelativeTwoHandWeaponAxis(
-                    twoHandAnchorTargetAxis,
-                    twoHandAnchorControllerAxis,
-                    relativeControllerAxis,
-                    calibratedOneHandWeaponAxis,
-                    currentTwoHandTargetAxis,
-                    pairSteeredWeaponAxis);
-
-                if (!kisak::vr::weapon_calibration::BlendWeaponAxes(
-                        pairSteeredWeaponAxis,
-                        frontManipulatedWeaponAxis,
-                        0.65f,
-                        targetTwoHandWeaponAxis))
-                {
-                    std::memcpy(
-                        targetTwoHandWeaponAxis,
-                        pairSteeredWeaponAxis,
-                        sizeof(targetTwoHandWeaponAxis));
-                }
+                // 100% front-hand pivot when holding weapon only with the front hand
+                std::memcpy(
+                    targetTwoHandWeaponAxis,
+                    frontManipulatedWeaponAxis,
+                    sizeof(targetTwoHandWeaponAxis));
 
                 for (int c = 0; c < 3; ++c)
                 {
@@ -21388,8 +21542,7 @@ bool VR_ApplyRightControllerToWeaponPlacement(
                         anchorBaseline[2] * leftDeltaRotation[2][c];
                     const float frontDrivenRightPos =
                         leftForegripPosition[c] - rotatedBaseline;
-                    currentPosition[c] +=
-                        (frontDrivenRightPos - currentPosition[c]) * twoHandBlend;
+                    currentPosition[c] = frontDrivenRightPos;
                 }
             }
             else
@@ -23332,6 +23485,13 @@ void VR_WriteCalibrationStatus(
                << VrCalibration::RecenterModeId(recenterMode)
                << "\r\n";
         output << "RECENTERED=" << (recentered ? 1 : 0) << "\r\n";
+        if (g_vrTPoseTelemetry.valid)
+        {
+            output << "WINGSPAN_INCHES=" << g_vrTPoseTelemetry.wingspanInches << "\r\n";
+            output << "SHOULDER_WIDTH_INCHES=" << g_vrTPoseTelemetry.shoulderWidthInches << "\r\n";
+            output << "ARM_LENGTH_INCHES=" << g_vrTPoseTelemetry.armLengthInches << "\r\n";
+            output << "RIG_SCALE_FACTOR=" << g_vrTPoseTelemetry.rigScaleFactor << "\r\n";
+        }
         output.flush();
 
         if (!output)
@@ -23639,6 +23799,26 @@ void VR_ProcessCalibrationRequest(
         {
             appliedEyeHeightInches =
                 measuredEyeHeightInches;
+        }
+    }
+    else if (request.command ==
+             VrCalibration::Command::CalibrateTPose)
+    {
+        VR_StartTPoseCalibration();
+
+        // Sample controllers if poses are valid
+        const float* leftPos = g_vrLeftControllerForegripPoseValid ? g_vrLeftControllerForegripPosition : nullptr;
+        const float* rightPos = g_vrRightControllerWeaponPoseValid ? g_vrRightControllerWeaponPosition : nullptr;
+        if (leftPos && rightPos)
+        {
+            const float span = VR_Distance3(leftPos, rightPos);
+            g_vrTPoseTelemetry.wingspanInches = (span > 30.0f && span < 100.0f) ? span : 70.0f;
+            g_vrTPoseTelemetry.armLengthInches = g_vrTPoseTelemetry.wingspanInches * 0.42f;
+            g_vrTPoseTelemetry.shoulderWidthInches = g_vrTPoseTelemetry.wingspanInches * 0.26f;
+            g_vrTPoseTelemetry.standingEyeHeightInches = appliedEyeHeightInches > 40.0f ? appliedEyeHeightInches : 60.0f;
+            g_vrTPoseTelemetry.shoulderHeightInches = g_vrTPoseTelemetry.standingEyeHeightInches - 7.5f;
+            g_vrTPoseTelemetry.rigScaleFactor = std::clamp(g_vrTPoseTelemetry.standingEyeHeightInches / 60.0f, 0.75f, 1.35f);
+            g_vrTPoseTelemetry.valid = true;
         }
     }
 
@@ -25489,6 +25669,13 @@ void VR_PollOpenVrEvents()
 
             g_vrOpenVrSystem->AcknowledgeQuit_Exiting();
             g_vrExitRequested = true;
+        }
+        else if (event.eventType == vr::VREvent_SeatedZeroPoseReset ||
+                 event.eventType == vr::VREvent_StandingZeroPoseReset)
+        {
+            Com_Printf(0, "[VR][OPENVR] Headset zero pose reset; resetting static world canvas latch.\n");
+            s_openVrStaticCanvasActive = false;
+            s_staticWorldCanvasActive = false;
         }
     }
 }
@@ -28683,6 +28870,11 @@ void VR_ToggleHoldToGrip()
 bool VR_IsPhysicalWeaponHolstered()
 {
     return g_vrHoldToGripEnabled && g_vrPhysicalBodyRig.weaponHolstered;
+}
+
+bool VR_IsRightControllerGripHeld()
+{
+    return g_vrRightControllerSqueezePressedRaw;
 }
 
 // -------------------------------------------------------------------------

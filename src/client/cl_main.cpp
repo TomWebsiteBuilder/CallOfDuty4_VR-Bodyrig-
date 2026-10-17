@@ -827,6 +827,23 @@ void __cdecl CL_Frame(int localClientNum, int msec)
             SND_StopSounds(SND_STOP_ALL);
             UI_SetActiveMenu(0, UIMENU_MAIN);
         }
+
+        static bool s_vrTestModeInitialized = false;
+        const dvar_s* vrTestDvar = Dvar_FindVar("vr_testMode");
+        if (clientUIActives[0].connectionState == CA_ACTIVE)
+        {
+            if (vrTestDvar && vrTestDvar->current.enabled && !s_vrTestModeInitialized)
+            {
+                s_vrTestModeInitialized = true;
+                Com_Printf(0, "[VR] Sandbox test range active: unlocking full weapon armory, infinite ammo, and godmode.\n");
+                Cbuf_AddText(0, "thereisacow 1337\ngive all\ngive ammo\ngod\n");
+            }
+        }
+        else
+        {
+            s_vrTestModeInitialized = false;
+        }
+
         CL_DevGuiFrame(0);
         //Profile_Begin(366);
         if (localClientNum)
@@ -1947,6 +1964,7 @@ void __cdecl CL_Init(int localClientNum)
     Dvar_RegisterBool("vr_wristAmmo", true, DVAR_ARCHIVE, "Display live ammunition counter on operator wrist");
     Dvar_RegisterBool("vr_seatedMode", false, DVAR_ARCHIVE, "Enable seated VR playstyle mode");
     Dvar_RegisterBool("vr_holdToGrip", true, DVAR_ARCHIVE, "Enable holster tethering (hold-to-grip)");
+    Dvar_RegisterBool("vr_testMode", false, DVAR_ARCHIVE, "Enable dedicated VR sandbox weapons testing range");
 #endif
     Com_Printf(14, "----- Initializing Renderer ----\n");
 

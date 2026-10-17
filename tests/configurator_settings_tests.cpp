@@ -2194,8 +2194,8 @@ int main(const int argumentCount, char** arguments)
 
     const auto& catalog = kc::SettingsCatalog();
     Check(
-        catalog.size() == 158u,
-        "focused issue build should retain all 158 verified settings (actual " +
+        catalog.size() == 161u,
+        "focused issue build should retain all 161 verified settings (actual " +
             std::to_string(catalog.size()) + ")");
     Check(vi::kActionCount == 25u, "focused issue build should expose 25 actions");
 
@@ -2225,7 +2225,10 @@ int main(const int argumentCount, char** arguments)
             values["KISAK_VR_SUPPORT_GRIP_MODE"] == "hold" &&
             values["KISAK_VR_OBJECT_GRIP_MODE"] == "hold" &&
             values["KISAK_VR_MELEE_MODE"] == "both" &&
-            values["KISAK_VR_GRENADE_BELT_LAYOUT"] == "handed",
+            values["KISAK_VR_GRENADE_BELT_LAYOUT"] == "handed" &&
+            values["KISAK_VR_WINGSPAN_INCHES"] == "70.0" &&
+            values["KISAK_VR_PLAYER_SKIN_OVERRIDE"] == "-1" &&
+            values["KISAK_VR_COMPASS_MODE"] == "0",
         "V64 should preserve the tested right-handed behavior while enabling optional physical interactions");
 
     {
@@ -2286,8 +2289,8 @@ int main(const int argumentCount, char** arguments)
         }
     }
     Check(
-        physicalSettingCount == 29u,
-        "focused issue build should classify all 29 physical calibration/interaction fields and no HUD pixel fields");
+        physicalSettingCount == 30u,
+        "focused issue build should classify all 30 physical calibration/interaction fields and no HUD pixel fields");
 
     const kc::SettingDefinition* const standingHeight =
         kc::FindSetting("KISAK_VR_STANDING_EYE_HEIGHT");

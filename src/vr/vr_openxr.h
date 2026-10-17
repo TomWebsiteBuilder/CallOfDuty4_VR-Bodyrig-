@@ -671,6 +671,7 @@ void VR_SetHoldToGripEnabled(bool enabled);
 bool VR_IsHoldToGripEnabled();
 void VR_ToggleHoldToGrip();
 bool VR_IsPhysicalWeaponHolstered();
+bool VR_IsRightControllerGripHeld();
 
 // -------------------------------------------------------------------------
 // 3D Menu Laser Pointer & Selection
@@ -683,4 +684,9 @@ bool VR_ConsumeMenuLaserClick();
 // Physical Grenade Pin Pull Mechanics
 // -------------------------------------------------------------------------
 bool VR_IsGrenadePinPulled();
+
+// -------------------------------------------------------------------------
+// Left Wrist World Pose for Diegetic HUD Attachments
+// -------------------------------------------------------------------------
+bool VR_GetRenderedLeftWristWorldPose(float* outOrigin, float (*outAxis)[3]);
 

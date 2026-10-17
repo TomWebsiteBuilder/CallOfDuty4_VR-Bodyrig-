@@ -541,6 +541,13 @@ struct VrAirSupportRightHandAsset
     int weaponIndex = -1;
     uint32_t visibleTriangleCount = 0u;
     uint32_t stableIdlePoseFrames = 0u;
+    float modelAnatomicalGripAxis[3][3] = {
+        {1.0f, 0.0f, 0.0f},
+        {0.0f, 1.0f, 0.0f},
+        {0.0f, 0.0f, 1.0f},
+    };
+    float modelPalmAnchor[3] = {};
+    bool modelAnatomicalFrameReady = false;
     bool ready = false;
     bool failed = false;
     bool objectCreated = false;
@@ -915,6 +922,23 @@ static float s_vrLastRenderedLeftWristAxis[3][3] = {
     {0.0f, 0.0f, 1.0f},
 };
 static bool s_vrLastRenderedLeftWristValid = false;
+
+bool VR_GetRenderedLeftWristWorldPose(float* outOrigin, float (*outAxis)[3])
+{
+    if (!s_vrLastRenderedLeftWristValid)
+    {
+        return false;
+    }
+    if (outOrigin != nullptr)
+    {
+        std::memcpy(outOrigin, s_vrLastRenderedLeftWristOrigin, sizeof(s_vrLastRenderedLeftWristOrigin));
+    }
+    if (outAxis != nullptr)
+    {
+        std::memcpy(outAxis, s_vrLastRenderedLeftWristAxis, sizeof(s_vrLastRenderedLeftWristAxis));
+    }
+    return true;
+}
 
 static bool VR_IsStockAirSupportDesignator(
     const WeaponDef* weaponDef)
@@ -1421,6 +1445,123 @@ static bool VR_BuildModelAnatomicalGripFrame(
     return true;
 }
 
+static bool VR_BuildRightModelAnatomicalGripFrame(
+    const XModel* model,
+    const int wristIndex,
+    const DObjAnimMat& wristPose,
+    float modelAnatomicalGripAxis[3][3],
+    float modelPalmAnchor[3],
+    int* contributingFingerBaseCount)
+{
+    if (model == nullptr ||
+        modelAnatomicalGripAxis == nullptr ||
+        modelPalmAnchor == nullptr ||
+        contributingFingerBaseCount == nullptr)
+    {
+        return false;
+    }
+
+    static const char* const kNonThumbFingerBaseNames[] = {
+        "j_index_ri_0",
+        "j_mid_ri_0",
+        "j_ring_ri_0",
+        "j_pinky_ri_0",
+    };
+
+    float fingerBaseCenter[3] = {};
+    int fingerBaseCount = 0;
+
+    for (const char* fingerBaseName : kNonThumbFingerBaseNames)
+    {
+        float fingerBaseOrigin[3] = {};
+        if (!VR_GetModelBoneOriginInWristSpace(
+                model,
+                wristIndex,
+                wristPose,
+                fingerBaseName,
+                fingerBaseOrigin))
+        {
+            continue;
+        }
+
+        for (int component = 0; component < 3; ++component)
+        {
+            fingerBaseCenter[component] += fingerBaseOrigin[component];
+        }
+        ++fingerBaseCount;
+    }
+
+    float thumbBaseOrigin[3] = {};
+    if (fingerBaseCount <= 0 ||
+        !VR_GetModelBoneOriginInWristSpace(
+            model,
+            wristIndex,
+            wristPose,
+            "j_thumb_ri_0",
+            thumbBaseOrigin))
+    {
+        return false;
+    }
+
+    for (int component = 0; component < 3; ++component)
+    {
+        fingerBaseCenter[component] /= static_cast<float>(fingerBaseCount);
+    }
+
+    float wristToFingers[3] = {
+        fingerBaseCenter[0],
+        fingerBaseCenter[1],
+        fingerBaseCenter[2],
+    };
+
+    if (!VR_NormalizeModelHandDirection(wristToFingers))
+    {
+        return false;
+    }
+
+    const float thumbLongitudinalComponent =
+        thumbBaseOrigin[0] * wristToFingers[0] +
+        thumbBaseOrigin[1] * wristToFingers[1] +
+        thumbBaseOrigin[2] * wristToFingers[2];
+
+    float littleToThumb[3] = {
+        thumbBaseOrigin[0] - thumbLongitudinalComponent * wristToFingers[0],
+        thumbBaseOrigin[1] - thumbLongitudinalComponent * wristToFingers[1],
+        thumbBaseOrigin[2] - thumbLongitudinalComponent * wristToFingers[2],
+    };
+
+    if (!VR_NormalizeModelHandDirection(littleToThumb))
+    {
+        return false;
+    }
+
+    float outOfPalm[3] = {};
+    VR_CrossModelHandDirections(wristToFingers, littleToThumb, outOfPalm);
+
+    if (!VR_NormalizeModelHandDirection(outOfPalm))
+    {
+        return false;
+    }
+
+    VR_CrossModelHandDirections(outOfPalm, wristToFingers, littleToThumb);
+    if (!VR_NormalizeModelHandDirection(littleToThumb))
+    {
+        return false;
+    }
+
+    for (int component = 0; component < 3; ++component)
+    {
+        modelAnatomicalGripAxis[0][component] = wristToFingers[component];
+        modelAnatomicalGripAxis[1][component] = littleToThumb[component];
+        modelAnatomicalGripAxis[2][component] = outOfPalm[component];
+
+        modelPalmAnchor[component] = fingerBaseCenter[component] * 0.5f;
+    }
+
+    *contributingFingerBaseCount = fingerBaseCount;
+    return true;
+}
+
 static void VR_AccumulateSplitHandBoneWeight(
     const XModel* sourceModel,
     const int boneIndex,
@@ -1637,11 +1778,8 @@ static bool VR_SelectSplitHandTriangle(
         }
 
         if (rightArmWeights != nullptr &&
-            rightHandWeights != nullptr &&
-            rightArmWeightSum >= 0.50f)
+            rightHandWeights != nullptr)
         {
-            // Keep the right glove plus its full wrist cuff on the weapon viewmodel
-            // so the dynamic 2-bone IK right arm and wrist socket bridge seamlessly.
             return
                 rightHandWeightSum >= 0.32f &&
                 maximumRightHandWeight >= 0.18f;
@@ -1650,8 +1788,6 @@ static bool VR_SelectSplitHandTriangle(
         return true;
     }
 
-    // Keep the glove plus its wrist-weighted cuff so the left wrist socket
-    // bridges seamlessly into the floating left glove without a gap.
     return
         leftHandWeightSum >= 0.32f &&
         maximumLeftHandWeight >= 0.18f;
@@ -4104,6 +4240,17 @@ static bool VR_BuildAirSupportRightHandModel(
         rightWristIndex;
     asset->visibleTriangleCount =
         visibleTriangleCount;
+
+    int rightContributingFingerCount = 0;
+    asset->modelAnatomicalFrameReady =
+        VR_BuildRightModelAnatomicalGripFrame(
+            sourceModel,
+            rightWristIndex,
+            baseRightWristPose,
+            asset->modelAnatomicalGripAxis,
+            asset->modelPalmAnchor,
+            &rightContributingFingerCount);
+
     asset->ready = true;
 
     Com_Printf(
@@ -7293,11 +7440,30 @@ static void VR_AddManualGrenadeModelToScene(
         return;
     }
 
+    XModel* activeGrenadeModel = nullptr;
+    if (!VR_IsGrenadePinPulled() && grenadeWeaponDef->worldModel[0] != nullptr)
+    {
+        activeGrenadeModel = grenadeWeaponDef->worldModel[0];
+    }
+    else if (grenadeWeaponDef->projectileModel != nullptr)
+    {
+        activeGrenadeModel = grenadeWeaponDef->projectileModel;
+    }
+    else if (grenadeWeaponDef->worldModel[0] != nullptr)
+    {
+        activeGrenadeModel = grenadeWeaponDef->worldModel[0];
+    }
+
+    if (activeGrenadeModel == nullptr)
+    {
+        return;
+    }
+
     VrManualGrenadeRenderObject* grenadeObject =
         VR_GetManualGrenadeRenderObject(
             static_cast<uint32_t>(
                 grenadeWeaponIndex),
-            grenadeWeaponDef->projectileModel);
+            activeGrenadeModel);
 
     if (grenadeObject == nullptr)
     {
@@ -8244,7 +8410,7 @@ static void VR_AddPhysicalBodyRigToScene(
             sizeof(rightWristAxisWorld));
         rightHandViewmodelSuppressed = true;
     }
-    else if (VR_IsPhysicalWeaponHolstered())
+    else if (VR_IsPhysicalWeaponHolstered() || !VR_IsRightControllerGripHeld())
     {
         rightHandViewmodelSuppressed = true;
         VR_GetRightControllerGripWorld(
@@ -8279,8 +8445,8 @@ static void VR_AddPhysicalBodyRigToScene(
     }
 
     // When the weapon viewmodel is suppressed because the right hand is holding
-    // a physical knife or grenade, submit the standalone right glove at the
-    // right wrist so the right hand stays visible and connected to the arm.
+    // a physical knife or grenade, or when empty-handed / holstered, submit the
+    // standalone right glove at the right wrist so the right hand stays visible and connected.
     if (rightHandViewmodelSuppressed && VR_TrackedHandsEnabled())
     {
         XModel* rightGloveSource =
@@ -8294,14 +8460,51 @@ static void VR_AddPhysicalBodyRigToScene(
             if (rightGloveAsset != nullptr &&
                 VR_CreateAirSupportRightHandObject(rightGloveAsset))
             {
+                float finalRightWristOrigin[3] = {
+                    rightWristWorld[0],
+                    rightWristWorld[1],
+                    rightWristWorld[2],
+                };
+                float finalRightWristAxis[3][3] = {};
+
+                if (rightGloveAsset->modelAnatomicalFrameReady &&
+                    (VR_IsPhysicalWeaponHolstered() || !VR_IsRightControllerGripHeld()))
+                {
+                    float invAnatomical[3][3] = {};
+                    for (int r = 0; r < 3; ++r)
+                    {
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            invAnatomical[r][c] = rightGloveAsset->modelAnatomicalGripAxis[c][r];
+                        }
+                    }
+                    MatrixMultiply(
+                        *reinterpret_cast<const mat3x3*>(invAnatomical),
+                        *reinterpret_cast<const mat3x3*>(rightWristAxisWorld),
+                        *reinterpret_cast<mat3x3*>(finalRightWristAxis));
+
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        finalRightWristOrigin[c] -=
+                            rightGloveAsset->modelPalmAnchor[0] * finalRightWristAxis[0][c] +
+                            rightGloveAsset->modelPalmAnchor[1] * finalRightWristAxis[1][c] +
+                            rightGloveAsset->modelPalmAnchor[2] * finalRightWristAxis[2][c];
+                    }
+                    std::memcpy(rightWristWorld, finalRightWristOrigin, sizeof(rightWristWorld));
+                }
+                else
+                {
+                    std::memcpy(finalRightWristAxis, rightWristAxisWorld, sizeof(finalRightWristAxis));
+                }
+
                 float rawRightQuat[4] = {};
                 float normRightQuat[4] = {};
-                AxisToQuat(rightWristAxisWorld, rawRightQuat);
+                AxisToQuat(finalRightWristAxis, rawRightQuat);
                 if (VR_NormalizeHandQuaternion(rawRightQuat, normRightQuat) &&
                     VR_SetRigidHandRootPose(
                         &rightGloveAsset->object,
                         &rightGloveAsset->pose,
-                        rightWristWorld,
+                        finalRightWristOrigin,
                         normRightQuat))
                 {
                     float mutableLightingOrigin[3] = {
@@ -8364,10 +8567,10 @@ static void VR_AddPhysicalBodyRigToScene(
     const VrPlayerFaction currentFaction = VR_GetMissionPlayerFaction(sourceHandModel);
     XModel* factionModel = VR_ResolveFactionCharacterModel(currentFaction);
 
-    XModel* donorModel = factionModel != nullptr
-        ? factionModel
-        : (sourceHandModel != nullptr
-               ? sourceHandModel
+    XModel* donorModel = (sourceHandModel != nullptr)
+        ? sourceHandModel
+        : (factionModel != nullptr
+               ? factionModel
                : s_vrAirSupportStableRightHandDonorModel);
 
     VrBodyRigTorsoAndArmsAsset* rigAsset =

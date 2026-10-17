@@ -37,6 +37,7 @@ enum class Command
     RecenterFull,
     MeasureStanding,
     ApplyHeight,
+    CalibrateTPose,
 };
 
 struct Request
@@ -115,6 +116,8 @@ inline const char* CommandId(const Command command)
         return "measure_standing";
     case Command::ApplyHeight:
         return "apply_height";
+    case Command::CalibrateTPose:
+        return "calibrate_tpose";
     default:
         return "invalid";
     }
@@ -253,6 +256,10 @@ inline bool ParseRequest(
             else if (value == "apply_height")
             {
                 parsed.command = Command::ApplyHeight;
+            }
+            else if (value == "calibrate_tpose")
+            {
+                parsed.command = Command::CalibrateTPose;
             }
             else
             {

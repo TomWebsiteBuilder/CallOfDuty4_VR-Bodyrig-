@@ -171,3 +171,30 @@ if(MSVC)
             /utf-8
     )
 endif()
+
+add_executable(
+    KisakCOD-VR-Test
+    WIN32
+    test_launcher.cpp
+)
+
+target_compile_features(
+    KisakCOD-VR-Test
+    PRIVATE
+        cxx_std_17
+)
+
+target_link_libraries(
+    KisakCOD-VR-Test
+    PRIVATE
+        shell32
+)
+
+if(MSVC)
+    set_property(
+        TARGET KisakCOD-VR-Test
+        PROPERTY MSVC_RUNTIME_LIBRARY
+        "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
+endif()
+

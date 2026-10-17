@@ -119,6 +119,7 @@ static_assert(
 constexpr int kIdSetupOpenReport = 133;
 constexpr int kIdCalibrationRecenterPosition = 134;
 constexpr int kIdCalibrationRecenterDirectionLevel = 135;
+constexpr int kIdCalibrationTPose = 136;
 constexpr int kIdSettingBase = 2000;
 
 constexpr int kIdWeaponEditWeapon = 500;
@@ -4436,6 +4437,17 @@ bool SendCalibrationCommand(
             L"Standing eye height applied by " + backend + L": " +
             applied + L"; position and direction/level were preserved";
         break;
+    case vc::Command::CalibrateTPose:
+        {
+            const auto itWingspan = response.find("WINGSPAN_INCHES");
+            const std::wstring spanStr = itWingspan != response.end() ? ToWide(itWingspan->second) : L"70.0";
+            success = L"Physical T-Pose wingspan calibrated by " + backend + L": " + spanStr + L" inches. Dynamic body rig scaling applied";
+            if (itWingspan != response.end())
+            {
+                SetCalibrationValue(state, "KISAK_VR_WINGSPAN_INCHES", itWingspan->second);
+            }
+        }
+        break;
     default:
         success =
             L"Applied by " + backend + L": " + applied +
@@ -4506,6 +4518,22 @@ void ApplySeatedCalibration(AppState& state)
     SendCalibrationCommand(
         state,
         vc::Command::RecenterPosition,
+        true);
+}
+
+void CalibrateTPoseCalibration(AppState& state)
+{
+    SetCalibrationStatus(
+        state,
+        L"Calibrating physical T-Pose: extend your arms horizontally in the headset...");
+    MessageBoxW(
+        state.window,
+        L"Stand upright with arms fully extended horizontally (T-Pose).\r\n\r\nAfter pressing OK, the game captures your physical wingspan from controller distance and dynamically scales the tactical body rig.",
+        L"Operator Biometric T-Pose Calibration",
+        MB_OK | MB_ICONINFORMATION);
+    SendCalibrationCommand(
+        state,
+        vc::Command::CalibrateTPose,
         true);
 }
 
@@ -5665,15 +5693,26 @@ void BuildCalibrationPanel(AppState& state)
         32,
         kIdCalibrationTaller));
 
+    add(CreateControl(
+        state,
+        L"BUTTON",
+        L"Calibrate physical T-Pose wingspan & arm lengths (5s hold)",
+        BS_PUSHBUTTON | WS_TABSTOP,
+        kTabLeft + 20,
+        kTabTop + 538,
+        584,
+        34,
+        kIdCalibrationTPose));
+
     state.calibrationStatus = add(CreateControl(
         state,
         L"STATIC",
         L"Status: Save and launch COD4, enter a mission, then use a calibration button.",
         SS_LEFT,
         kTabLeft + 20,
-        kTabTop + 540,
+        kTabTop + 578,
         kTabWidth - 40,
-        38));
+        34));
 }
 
 void ShowHudPanel(
@@ -7287,6 +7326,9 @@ LRESULT CALLBACK MainWindowProc(
             return 0;
         case kIdCalibrationTaller:
             AdjustCalibrationHeight(*state, 1.0, false);
+            return 0;
+        case kIdCalibrationTPose:
+            CalibrateTPoseCalibration(*state);
             return 0;
         case kIdHudVisualEditor:
             OpenVisualHudEditor(*state);
