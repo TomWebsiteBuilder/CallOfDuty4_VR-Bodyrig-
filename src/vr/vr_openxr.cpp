@@ -17658,8 +17658,28 @@ void VR_UpdateManualMagazineReload(
             g_vrLeftControllerForegripPosition[2] >=
                 beltMinimumUp;
 
+        // Generous radial proximity check in addition to bounding box for smooth grabbing
+        float distToPrimaryPouchSq = 99999.0f;
+        float distToSecondaryPouchSq = 99999.0f;
+        if (g_vrLeftControllerForegripPoseValid)
+        {
+            const float dx1 = g_vrLeftControllerForegripPosition[0] - (3.0f + configurable.beltForwardOffset);
+            const float dy1 = g_vrLeftControllerForegripPosition[1] - magazineHipCenter;
+            const float dz1 = g_vrLeftControllerForegripPosition[2] - configurable.beltHeight;
+            distToPrimaryPouchSq = dx1 * dx1 + dy1 * dy1 + dz1 * dz1;
+
+            const float dx2 = g_vrLeftControllerForegripPosition[0] - (8.0f + configurable.beltForwardOffset);
+            const float dy2 = g_vrLeftControllerForegripPosition[1] - secMagHipCenter;
+            const float dz2 = g_vrLeftControllerForegripPosition[2] - configurable.beltHeight;
+            distToSecondaryPouchSq = dx2 * dx2 + dy2 * dy2 + dz2 * dz2;
+        }
+        const float pouchRadialThresholdSq = (configurable.beltGrabRadius * 1.5f) * (configurable.beltGrabRadius * 1.5f);
+        const bool offhandNearPouchSphere =
+            distToPrimaryPouchSq <= pouchRadialThresholdSq ||
+            distToSecondaryPouchSq <= pouchRadialThresholdSq;
+
         const bool offhandGripAtAnyMagHolder =
-            offhandGripAtMagazineHip || offhandGripAtSecMagHip;
+            offhandGripAtMagazineHip || offhandGripAtSecMagHip || offhandNearPouchSphere;
 
         const float loadedMagazineDelta[3] = {
             leftGripWorld[0] - magazineWellOrigin[0],
@@ -17671,6 +17691,8 @@ void VR_UpdateManualMagazineReload(
                 loadedMagazineDelta[0] * loadedMagazineDelta[0] +
                 loadedMagazineDelta[1] * loadedMagazineDelta[1] +
                 loadedMagazineDelta[2] * loadedMagazineDelta[2]);
+
+        static bool s_loadedMagClearedWell = false;
 
         // Method 1: Manually grabbing the loaded clip from the gun
         const bool canGrabLoaded =
@@ -17687,10 +17709,11 @@ void VR_UpdateManualMagazineReload(
                 VrManualMagazineReloadStage::HoldingLoaded;
             g_vrManualMagazineReload.loadedMagazineStillInWeapon = false;
             g_vrManualMagazineReload.heldPoseValid = true;
+            s_loadedMagClearedWell = false;
             for (int c = 0; c < 3; ++c)
             {
                 g_vrManualMagazineReload.heldOrigin[c] =
-                    leftGripWorld[c] - 3.0f * leftGripWorldAxis[2][c];
+                    leftGripWorld[c] + leftGripWorldAxis[0][c] * 0.5f - leftGripWorldAxis[2][c] * 0.8f;
             }
             std::memcpy(
                 g_vrManualMagazineReload.heldAxis,
@@ -17709,7 +17732,7 @@ void VR_UpdateManualMagazineReload(
                 for (int c = 0; c < 3; ++c)
                 {
                     g_vrManualMagazineReload.heldOrigin[c] =
-                        leftGripWorld[c] - 3.0f * leftGripWorldAxis[2][c];
+                        leftGripWorld[c] + leftGripWorldAxis[0][c] * 0.5f - leftGripWorldAxis[2][c] * 0.8f;
                 }
                 std::memcpy(
                     g_vrManualMagazineReload.heldAxis,
@@ -17717,38 +17740,68 @@ void VR_UpdateManualMagazineReload(
                     sizeof(g_vrManualMagazineReload.heldAxis));
             }
 
-            if (loadedMagazineDistance >=
-                configurable.reloadPullDistance ||
-                (squeezeReleasedEdge &&
-                 loadedMagazineDistance >= configurable.reloadPullDistance * 0.50f))
+            if (loadedMagazineDistance >= configurable.reloadPullDistance)
             {
-                g_vrManualMagazineReload.stage =
-                    VrManualMagazineReloadStage::Ejected;
-                g_vrManualMagazineReload.heldPoseValid = false;
-                g_vrManualMagazineReload.ejectedAtMilliseconds =
-                    nowMilliseconds;
-                std::memcpy(
-                    g_vrManualMagazineReload.ejectedOrigin,
-                    leftGripWorld,
-                    sizeof(g_vrManualMagazineReload.ejectedOrigin));
-                std::memcpy(
-                    g_vrManualMagazineReload.ejectedAxis,
-                    leftGripWorldAxis,
-                    sizeof(g_vrManualMagazineReload.ejectedAxis));
-                for (int component = 0; component < 3; ++component)
+                if (!s_loadedMagClearedWell)
                 {
-                    g_vrManualMagazineReload.ejectedVelocity[component] =
-                        0.0f;
+                    s_loadedMagClearedWell = true;
+                    applyInsertHaptic = true;
+                    Com_Printf(
+                        0,
+                        "[VR][RELOAD] Loaded magazine extracted from weapon well.\n");
                 }
-                logEjected = true;
-                ejectedByPull = true;
             }
-            else if (squeezeReleasedEdge)
+
+            // Re-insertion: if the magazine cleared the well and is moved back into insertion radius
+            if (s_loadedMagClearedWell &&
+                loadedMagazineDistance <= configurable.reloadInsertRadius * 1.5f)
             {
                 g_vrManualMagazineReload.stage =
                     VrManualMagazineReloadStage::Ready;
                 g_vrManualMagazineReload.heldPoseValid = false;
-                logPullCanceled = true;
+                g_vrManualMagazineReload.heldNearMagazineWell = false;
+                g_vrManualMagazineReload.loadedMagazineStillInWeapon = false;
+                s_loadedMagClearedWell = false;
+                applyInsertHaptic = true;
+                Com_Printf(
+                    0,
+                    "[VR][RELOAD] Detached magazine re-inserted into weapon well.\n");
+            }
+            else if (squeezeReleasedEdge)
+            {
+                if (s_loadedMagClearedWell &&
+                    loadedMagazineDistance >= configurable.reloadPullDistance * 0.50f)
+                {
+                    g_vrManualMagazineReload.stage =
+                        VrManualMagazineReloadStage::Ejected;
+                    g_vrManualMagazineReload.heldPoseValid = false;
+                    g_vrManualMagazineReload.ejectedAtMilliseconds =
+                        nowMilliseconds;
+                    std::memcpy(
+                        g_vrManualMagazineReload.ejectedOrigin,
+                        leftGripWorld,
+                        sizeof(g_vrManualMagazineReload.ejectedOrigin));
+                    std::memcpy(
+                        g_vrManualMagazineReload.ejectedAxis,
+                        leftGripWorldAxis,
+                        sizeof(g_vrManualMagazineReload.ejectedAxis));
+                    for (int component = 0; component < 3; ++component)
+                    {
+                        g_vrManualMagazineReload.ejectedVelocity[component] =
+                            0.0f;
+                    }
+                    logEjected = true;
+                    ejectedByPull = true;
+                    s_loadedMagClearedWell = false;
+                }
+                else
+                {
+                    g_vrManualMagazineReload.stage =
+                        VrManualMagazineReloadStage::Ready;
+                    g_vrManualMagazineReload.heldPoseValid = false;
+                    s_loadedMagClearedWell = false;
+                    logPullCanceled = true;
+                }
             }
         }
 
@@ -17779,7 +17832,7 @@ void VR_UpdateManualMagazineReload(
             for (int c = 0; c < 3; ++c)
             {
                 g_vrManualMagazineReload.heldOrigin[c] =
-                    leftGripWorld[c] - 3.0f * leftGripWorldAxis[2][c];
+                    leftGripWorld[c] + leftGripWorldAxis[0][c] * 0.5f - leftGripWorldAxis[2][c] * 0.8f;
             }
 
             std::memcpy(
@@ -17801,7 +17854,7 @@ void VR_UpdateManualMagazineReload(
             for (int c = 0; c < 3; ++c)
             {
                 g_vrManualMagazineReload.heldOrigin[c] =
-                    leftGripWorld[c] - 3.0f * leftGripWorldAxis[2][c];
+                    leftGripWorld[c] + leftGripWorldAxis[0][c] * 0.5f - leftGripWorldAxis[2][c] * 0.8f;
             }
 
             std::memcpy(
@@ -19584,8 +19637,8 @@ bool VR_GetPhysicalBodyRigRenderState(
             {
                 heldKnifeOrigin[c] =
                     handWorld[c] +
-                    handAxisWorld[0][c] * 1.5f -
-                    handAxisWorld[2][c] * 0.8f;
+                    handAxisWorld[0][c] * 1.8f -
+                    handAxisWorld[2][c] * 0.2f;
             }
             std::memcpy(heldKnifeAxis, handAxisWorld, sizeof(float) * 9);
         }
@@ -20344,10 +20397,13 @@ bool VR_UpdateManualGrenadeInput(
 
                         if (grabByRightHand)
                         {
-                            std::memcpy(
-                                g_vrManualGrenade.heldOrigin,
-                                rightWorld,
-                                sizeof(g_vrManualGrenade.heldOrigin));
+                            for (int c = 0; c < 3; ++c)
+                            {
+                                g_vrManualGrenade.heldOrigin[c] =
+                                    rightWorld[c] +
+                                    rightAxisWorld[0][c] * 0.6f -
+                                    rightAxisWorld[2][c] * 0.3f;
+                            }
                             std::memcpy(
                                 g_vrManualGrenade.heldAxis,
                                 rightAxisWorld,
@@ -20361,10 +20417,13 @@ bool VR_UpdateManualGrenadeInput(
                         }
                         else
                         {
-                            std::memcpy(
-                                g_vrManualGrenade.heldOrigin,
-                                currentOrigin,
-                                sizeof(g_vrManualGrenade.heldOrigin));
+                            for (int c = 0; c < 3; ++c)
+                            {
+                                g_vrManualGrenade.heldOrigin[c] =
+                                    currentOrigin[c] +
+                                    currentAxis[0][c] * 0.6f -
+                                    currentAxis[2][c] * 0.3f;
+                            }
                             std::memcpy(
                                 g_vrManualGrenade.heldAxis,
                                 currentAxis,
@@ -20410,10 +20469,13 @@ bool VR_UpdateManualGrenadeInput(
                 {
                     if (g_vrRightControllerWeaponPoseValid)
                     {
-                        std::memcpy(
-                            g_vrManualGrenade.heldOrigin,
-                            rightWorld,
-                            sizeof(g_vrManualGrenade.heldOrigin));
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            g_vrManualGrenade.heldOrigin[c] =
+                                rightWorld[c] +
+                                rightAxisWorld[0][c] * 0.6f -
+                                rightAxisWorld[2][c] * 0.3f;
+                        }
                         std::memcpy(
                             g_vrManualGrenade.heldAxis,
                             rightAxisWorld,
@@ -20432,10 +20494,13 @@ bool VR_UpdateManualGrenadeInput(
                 {
                     if (poseValid)
                     {
-                        std::memcpy(
-                            g_vrManualGrenade.heldOrigin,
-                            currentOrigin,
-                            sizeof(g_vrManualGrenade.heldOrigin));
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            g_vrManualGrenade.heldOrigin[c] =
+                                currentOrigin[c] +
+                                currentAxis[0][c] * 0.6f -
+                                currentAxis[2][c] * 0.3f;
+                        }
                         std::memcpy(
                             g_vrManualGrenade.heldAxis,
                             currentAxis,

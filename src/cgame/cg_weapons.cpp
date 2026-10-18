@@ -435,6 +435,7 @@ struct VrSplitHandAsset
     XSurface* rightOnlySurfaces = nullptr;
     XSurface* floatingLeftSurfaces = nullptr;
     XSurface* supportGripSurfaces = nullptr;
+    XSurface* magazineGripSurfaces = nullptr;
     DObjAnimMat* floatingRootBaseMat = nullptr;
     DObj_s floatingLeftObject = {};
     DObj_s supportGripObject = {};
@@ -533,10 +534,15 @@ struct VrAirSupportRightHandAsset
 {
     XModel* sourceModel = nullptr;
     XModel gloveModel = {};
+    XModel curledGloveModel = {};
     XSurface* gloveSurfaces = nullptr;
+    XSurface* curledGloveSurfaces = nullptr;
     DObjAnimMat* rootBaseMat = nullptr;
     DObj_s object = {};
+    DObj_s curledObject = {};
     cpose_t pose = {};
+    cpose_t curledPose = {};
+    bool curledObjectCreated = false;
     int rightWristIndex = -1;
     int weaponIndex = -1;
     uint32_t visibleTriangleCount = 0u;
@@ -2309,6 +2315,150 @@ static GfxPackedVertex* VR_CreateWristRootedVertexList(
     return wristRootedVertices;
 }
 
+static GfxPackedVertex* VR_CreateCurledGripVertexList(
+    const XSurface& sourceSurface,
+    const DObjAnimMat& baseWristPose,
+    const float baseWristAxis[3][3],
+    const float modelAnatomicalGripAxis[3][3],
+    const float modelPalmAnchor[3],
+    const bool isRightHand)
+{
+    if (sourceSurface.verts0 == nullptr ||
+        sourceSurface.vertCount == 0u ||
+        baseWristAxis == nullptr ||
+        modelAnatomicalGripAxis == nullptr)
+    {
+        return nullptr;
+    }
+
+    GfxPackedVertex* curledVertices =
+        reinterpret_cast<GfxPackedVertex*>(
+            Hunk_Alloc(
+                sourceSurface.vertCount * sizeof(GfxPackedVertex),
+                "VR curled grip hand vertices",
+                21));
+
+    if (curledVertices == nullptr)
+    {
+        return nullptr;
+    }
+
+    std::memcpy(
+        curledVertices,
+        sourceSurface.verts0,
+        sourceSurface.vertCount * sizeof(GfxPackedVertex));
+
+    // Anatomical basis in wrist-local coordinates:
+    // row 0: little-to-thumb (lateral axis across palm)
+    // row 1: into the palm
+    // row 2: wrist to fingertips (longitudinal forward axis)
+    const float latAxis[3] = {
+        modelAnatomicalGripAxis[0][0],
+        modelAnatomicalGripAxis[0][1],
+        modelAnatomicalGripAxis[0][2]
+    };
+    const float inPalmAxis[3] = {
+        modelAnatomicalGripAxis[1][0],
+        modelAnatomicalGripAxis[1][1],
+        modelAnatomicalGripAxis[1][2]
+    };
+    const float fwdAxis[3] = {
+        modelAnatomicalGripAxis[2][0],
+        modelAnatomicalGripAxis[2][1],
+        modelAnatomicalGripAxis[2][2]
+    };
+
+    const float cylinderRadius = 0.72f;
+    const float knuckleStart = 1.55f;
+
+    for (uint32_t vertexIndex = 0u; vertexIndex < sourceSurface.vertCount; ++vertexIndex)
+    {
+        const GfxPackedVertex& sourceVertex = sourceSurface.verts0[vertexIndex];
+        GfxPackedVertex& curledVertex = curledVertices[vertexIndex];
+
+        float localXYZ[3] = {};
+        InvMatrixTransformVectorQuatTrans(
+            sourceVertex.xyz,
+            &baseWristPose,
+            localXYZ);
+
+        float sourceNormal[3] = {};
+        float localNormal[3] = {};
+        Vec3UnpackUnitVec(sourceVertex.normal, sourceNormal);
+        MatrixTransposeTransformVector(
+            sourceNormal,
+            *reinterpret_cast<const mat3x3*>(baseWristAxis),
+            localNormal);
+        Vec3Normalize(localNormal);
+
+        float sourceTangent[3] = {};
+        float localTangent[3] = {};
+        Vec3UnpackUnitVec(sourceVertex.tangent, sourceTangent);
+        MatrixTransposeTransformVector(
+            sourceTangent,
+            *reinterpret_cast<const mat3x3*>(baseWristAxis),
+            localTangent);
+        Vec3Normalize(localTangent);
+
+        const float fwd = localXYZ[0] * fwdAxis[0] + localXYZ[1] * fwdAxis[1] + localXYZ[2] * fwdAxis[2];
+        const float inP = localXYZ[0] * inPalmAxis[0] + localXYZ[1] * inPalmAxis[1] + localXYZ[2] * inPalmAxis[2];
+        const float lat = localXYZ[0] * latAxis[0] + localXYZ[1] * latAxis[1] + localXYZ[2] * latAxis[2];
+
+        if (fwd > knuckleStart)
+        {
+            const float s = fwd - knuckleStart;
+            const float sDivR = s / cylinderRadius;
+            const float phi = sDivR < 2.0f ? sDivR : 2.0f;
+            const float sinPhi = std::sin(phi);
+            const float cosPhi = std::cos(phi);
+
+            const float newFwd = knuckleStart + cylinderRadius * sinPhi;
+            const float newInP = inP + cylinderRadius * (1.0f - cosPhi);
+
+            for (int c = 0; c < 3; ++c)
+            {
+                curledVertex.xyz[c] =
+                    lat * latAxis[c] +
+                    newInP * inPalmAxis[c] +
+                    newFwd * fwdAxis[c];
+            }
+
+            auto rotateAroundLat = [&](const float inVec[3], float outVec[3])
+            {
+                float cross[3] = {
+                    latAxis[1] * inVec[2] - latAxis[2] * inVec[1],
+                    latAxis[2] * inVec[0] - latAxis[0] * inVec[2],
+                    latAxis[0] * inVec[1] - latAxis[1] * inVec[0]
+                };
+                float dot = latAxis[0] * inVec[0] + latAxis[1] * inVec[1] + latAxis[2] * inVec[2];
+                for (int c = 0; c < 3; ++c)
+                {
+                    outVec[c] = inVec[c] * cosPhi + cross[c] * sinPhi + latAxis[c] * dot * (1.0f - cosPhi);
+                }
+                Vec3Normalize(outVec);
+            };
+
+            float rotNormal[3] = {};
+            float rotTangent[3] = {};
+            rotateAroundLat(localNormal, rotNormal);
+            rotateAroundLat(localTangent, rotTangent);
+
+            curledVertex.normal = Vec3PackUnitVec(rotNormal);
+            curledVertex.tangent = Vec3PackUnitVec(rotTangent);
+        }
+        else
+        {
+            curledVertex.xyz[0] = localXYZ[0];
+            curledVertex.xyz[1] = localXYZ[1];
+            curledVertex.xyz[2] = localXYZ[2];
+            curledVertex.normal = Vec3PackUnitVec(localNormal);
+            curledVertex.tangent = Vec3PackUnitVec(localTangent);
+        }
+    }
+
+    return curledVertices;
+}
+
 static uint16_t* VR_CreateRigidRootBlendList(
     const XSurface& sourceSurface)
 {
@@ -2495,9 +2645,18 @@ static bool VR_BuildSplitHandModels(
                 "VR weapon-support hand surfaces",
                 21));
 
+    XSurface* magazineGripSurfaces =
+        reinterpret_cast<XSurface*>(
+            Hunk_Alloc(
+                sourceModel->numsurfs *
+                    sizeof(XSurface),
+                "VR magazine grip hand surfaces",
+                21));
+
     if (rightOnlySurfaces == nullptr ||
         floatingLeftSurfaces == nullptr ||
-        supportGripSurfaces == nullptr)
+        supportGripSurfaces == nullptr ||
+        magazineGripSurfaces == nullptr)
     {
         return false;
     }
@@ -2516,6 +2675,12 @@ static bool VR_BuildSplitHandModels(
 
     std::memcpy(
         supportGripSurfaces,
+        sourceModel->surfs,
+        sourceModel->numsurfs *
+            sizeof(XSurface));
+
+    std::memcpy(
+        magazineGripSurfaces,
         sourceModel->surfs,
         sourceModel->numsurfs *
             sizeof(XSurface));
@@ -2700,6 +2865,15 @@ static bool VR_BuildSplitHandModels(
                 baseLeftWristPose,
                 baseLeftWristAxis);
 
+        GfxPackedVertex* curledLeftVertices =
+            VR_CreateCurledGripVertexList(
+                sourceSurface,
+                baseLeftWristPose,
+                baseLeftWristAxis,
+                asset->modelAnatomicalGripAxis,
+                asset->modelPalmAnchor,
+                false);
+
         GfxPackedVertex* supportGripVertices =
             reinterpret_cast<GfxPackedVertex*>(
                 Hunk_Alloc(
@@ -2849,6 +3023,14 @@ static bool VR_BuildSplitHandModels(
         supportSurface.verts0 =
             supportGripVertices;
 
+        XSurface& magGripSurface =
+            magazineGripSurfaces[surfaceIndex];
+        magGripSurface = leftSurface;
+        magGripSurface.verts0 =
+            curledLeftVertices != nullptr
+                ? curledLeftVertices
+                : supportGripVertices;
+
         sourceTriangleCount +=
             sourceSurface.triCount;
 
@@ -2964,10 +3146,10 @@ static bool VR_BuildSplitHandModels(
     asset->supportGripModel.surfs =
         supportGripSurfaces;
 
-    // Both closed-hand models intentionally share the baked vertex buffer.
-    // They differ only in root bind and DObj pose publication.
     asset->magazineGripModel.surfs =
-        supportGripSurfaces;
+        magazineGripSurfaces;
+    asset->magazineGripSurfaces =
+        magazineGripSurfaces;
 
     // DObjGetSurfaces obtains its pose mask from the model LOD rather than the
     // individual surface.  Restrict every copied LOD to root bone zero as well
@@ -4055,7 +4237,16 @@ static bool VR_BuildAirSupportRightHandModel(
                 "VR air-support right glove surfaces",
                 21));
 
-    if (gloveSurfaces == nullptr)
+    XSurface* curledGloveSurfaces =
+        reinterpret_cast<XSurface*>(
+            Hunk_Alloc(
+                sourceModel->numsurfs *
+                    sizeof(XSurface),
+                "VR curled right glove surfaces",
+                21));
+
+    if (gloveSurfaces == nullptr ||
+        curledGloveSurfaces == nullptr)
     {
         return false;
     }
@@ -4178,6 +4369,15 @@ static bool VR_BuildAirSupportRightHandModel(
                 baseRightWristPose,
                 baseRightWristAxis);
 
+        GfxPackedVertex* curledRightVertices =
+            VR_CreateCurledGripVertexList(
+                sourceSurface,
+                baseRightWristPose,
+                baseRightWristAxis,
+                asset->modelAnatomicalGripAxis,
+                asset->modelPalmAnchor,
+                true);
+
         uint16_t* rigidRootBlends =
             VR_CreateRigidRootBlendList(
                 sourceSurface);
@@ -4281,6 +4481,14 @@ static bool VR_BuildAirSupportRightHandModel(
         gloveSurface.partBits[2] = 0;
         gloveSurface.partBits[3] = 0;
 
+        XSurface& curledGloveSurface =
+            curledGloveSurfaces[surfaceIndex];
+        curledGloveSurface = gloveSurface;
+        curledGloveSurface.verts0 =
+            curledRightVertices != nullptr
+                ? curledRightVertices
+                : wristRootedVertices;
+
         visibleTriangleCount +=
             surfaceVisibleTriangleCount;
     }
@@ -4328,6 +4536,15 @@ static bool VR_BuildAirSupportRightHandModel(
     asset->gloveModel.baseMat =
         rootBaseMat;
 
+    asset->curledGloveSurfaces = curledGloveSurfaces;
+    asset->curledGloveModel = *sourceModel;
+    asset->curledGloveModel.name =
+        sourceModel->name;
+    asset->curledGloveModel.surfs =
+        curledGloveSurfaces;
+    asset->curledGloveModel.baseMat =
+        rootBaseMat;
+
     for (int lodIndex = 0;
          lodIndex < 4;
          ++lodIndex)
@@ -4343,6 +4560,20 @@ static bool VR_BuildAirSupportRightHandModel(
             .lodInfo[lodIndex]
             .partBits[2] = 0;
         asset->gloveModel
+            .lodInfo[lodIndex]
+            .partBits[3] = 0;
+
+        asset->curledGloveModel
+            .lodInfo[lodIndex]
+            .partBits[0] =
+                static_cast<int>(0x80000000u);
+        asset->curledGloveModel
+            .lodInfo[lodIndex]
+            .partBits[1] = 0;
+        asset->curledGloveModel
+            .lodInfo[lodIndex]
+            .partBits[2] = 0;
+        asset->curledGloveModel
             .lodInfo[lodIndex]
             .partBits[3] = 0;
     }
@@ -4788,6 +5019,24 @@ static bool VR_CreateAirSupportRightHandObject(
     }
 
     asset->objectCreated = true;
+
+    if (!asset->curledObjectCreated && asset->curledGloveModel.surfs != nullptr)
+    {
+        DObjModel_s curledModelDescription = {};
+        curledModelDescription.model = &asset->curledGloveModel;
+        curledModelDescription.boneName = 0;
+        curledModelDescription.ignoreCollision = false;
+
+        DObjCreate(
+            &curledModelDescription,
+            1u,
+            nullptr,
+            &asset->curledObject,
+            0);
+
+        asset->curledPose.eType = ET_GENERAL;
+        asset->curledObjectCreated = true;
+    }
 
     return true;
 }
@@ -6854,37 +7103,29 @@ static bool VR_AddFloatingLeftHandToScene(
         drawHeldMagazine &&
         heldMagazineOrigin != nullptr &&
         heldMagazineAxis != nullptr &&
-        supportGripPoseReady &&
         VR_BuildHeldMagazineRenderAxis(
             heldMagazineAxis,
             magazineRenderAxis);
 
-    if (magazineGripPoseAvailable &&
-        !asset->magazineToWristPoseValid)
-    {
-        magazineGripPoseAvailable =
-            VR_CaptureHeldMagazineToWristTransform(
-                asset,
-                heldMagazineOrigin,
-                magazineRenderAxis,
-                freeWristOrigin,
-                freeWristAxis);
-    }
-
     if (magazineGripPoseAvailable)
     {
-        magazineGripPoseAvailable =
-            VR_BuildHeldMagazineWristTransform(
-                asset,
-                heldMagazineOrigin,
-                magazineRenderAxis,
-                magazineWristOrigin,
-                magazineWristAxis,
-                magazineWristQuaternion);
+        for (int c = 0; c < 3; ++c)
+        {
+            magazineWristOrigin[c] =
+                heldMagazineOrigin[c] -
+                magazineRenderAxis[0][c] * 3.5f -
+                magazineRenderAxis[2][c] * 0.4f;
+        }
+        std::memcpy(magazineWristAxis, magazineRenderAxis, sizeof(magazineWristAxis));
+        float rawQuat[4] = {};
+        AxisToQuat(magazineWristAxis, rawQuat);
+        VR_NormalizeHandQuaternion(rawQuat, magazineWristQuaternion);
+        asset->magazineGripLatched = true;
     }
-
-    asset->magazineGripLatched =
-        magazineGripPoseAvailable;
+    else
+    {
+        asset->magazineGripLatched = false;
+    }
 
     if (!drawHeldMagazine)
     {
@@ -7121,8 +7362,7 @@ static bool VR_AddFloatingLeftHandToScene(
     }
 
     const bool renderMagazineGripModel =
-        asset->magazineGripLatched &&
-        supportGripPoseReady;
+        asset->magazineGripLatched;
 
     const bool renderSupportGripModel =
         !renderMagazineGripModel &&
@@ -7279,6 +7519,11 @@ static void VR_FreeFloatingLeftHandRenderObjects()
         {
             DObjFree(
                 &asset.object);
+        }
+        if (asset.curledObjectCreated)
+        {
+            DObjFree(
+                &asset.curledObject);
         }
 
         // The copied model, surfaces, indices, vertices, and root bind are
@@ -8590,7 +8835,8 @@ static void VR_AddPhysicalBodyRigToScene(
         {
             rightWristWorld[i] =
                 bodyState.heldKnifeOrigin[i] -
-                bodyState.heldKnifeAxis[0][i] * 2.2f;
+                bodyState.heldKnifeAxis[0][i] * 3.5f -
+                bodyState.heldKnifeAxis[2][i] * 0.4f;
         }
         std::memcpy(
             rightWristAxisWorld,
@@ -8604,7 +8850,8 @@ static void VR_AddPhysicalBodyRigToScene(
         {
             rightWristWorld[i] =
                 heldGrenadeOrigin[i] -
-                heldGrenadeAxis[0][i] * 2.0f;
+                heldGrenadeAxis[0][i] * 3.5f -
+                heldGrenadeAxis[2][i] * 0.4f;
         }
         std::memcpy(
             rightWristAxisWorld,
@@ -8673,8 +8920,12 @@ static void VR_AddPhysicalBodyRigToScene(
                 };
                 float finalRightWristAxis[3][3] = {};
 
+                const bool holdingItemInRightHand =
+                    (bodyState.knifeDrawn && bodyState.knifeHandIndex == 1) ||
+                    (manualGrenadeHeld && VR_IsManualGrenadeHeldInWeaponHand());
+
                 if (rightGloveAsset->modelAnatomicalFrameReady &&
-                    (weaponNum == 0u || weaponViewModel == nullptr || VR_IsPhysicalWeaponHolstered()))
+                    (weaponNum == 0u || weaponViewModel == nullptr || VR_IsPhysicalWeaponHolstered() || holdingItemInRightHand))
                 {
                     float invAnatomical[3][3] = {};
                     for (int r = 0; r < 3; ++r)
@@ -8703,13 +8954,22 @@ static void VR_AddPhysicalBodyRigToScene(
                     std::memcpy(finalRightWristAxis, rightWristAxisWorld, sizeof(finalRightWristAxis));
                 }
 
+                DObj_s* rightHandDObj =
+                    (holdingItemInRightHand && rightGloveAsset->curledObjectCreated)
+                        ? &rightGloveAsset->curledObject
+                        : &rightGloveAsset->object;
+                cpose_t* rightHandPose =
+                    (holdingItemInRightHand && rightGloveAsset->curledObjectCreated)
+                        ? &rightGloveAsset->curledPose
+                        : &rightGloveAsset->pose;
+
                 float rawRightQuat[4] = {};
                 float normRightQuat[4] = {};
                 AxisToQuat(finalRightWristAxis, rawRightQuat);
                 if (VR_NormalizeHandQuaternion(rawRightQuat, normRightQuat) &&
                     VR_SetRigidHandRootPose(
-                        &rightGloveAsset->object,
-                        &rightGloveAsset->pose,
+                        rightHandDObj,
+                        rightHandPose,
                         finalRightWristOrigin,
                         normRightQuat))
                 {
@@ -8719,8 +8979,8 @@ static void VR_AddPhysicalBodyRigToScene(
                         lightingOrigin[2],
                     };
                     R_AddDObjToSceneUntracked(
-                        &rightGloveAsset->object,
-                        &rightGloveAsset->pose,
+                        rightHandDObj,
+                        rightHandPose,
                         3u,
                         mutableLightingOrigin,
                         0.0f);
@@ -10975,6 +11235,29 @@ void __cdecl CG_AddPlayerWeapon(
                     std::memcpy(
                         leftHandHeldAxis,
                         bodyRigState.heldKnifeAxis,
+                        sizeof(leftHandHeldAxis));
+                }
+
+                int offhandHeldGrenadeWeaponIndex = 0;
+                float offhandHeldGrenadeOrigin[3] = {};
+                float offhandHeldGrenadeAxis[3][3] = {};
+                const bool offhandGrenadeHeld = VR_GetManualGrenadeRenderState(
+                    &offhandHeldGrenadeWeaponIndex,
+                    offhandHeldGrenadeOrigin,
+                    offhandHeldGrenadeAxis);
+
+                if (!leftHandGrippingHeldObject &&
+                    offhandGrenadeHeld &&
+                    !VR_IsManualGrenadeHeldInWeaponHand())
+                {
+                    leftHandGrippingHeldObject = true;
+                    std::memcpy(
+                        leftHandHeldOrigin,
+                        offhandHeldGrenadeOrigin,
+                        sizeof(leftHandHeldOrigin));
+                    std::memcpy(
+                        leftHandHeldAxis,
+                        offhandHeldGrenadeAxis,
                         sizeof(leftHandHeldAxis));
                 }
 
