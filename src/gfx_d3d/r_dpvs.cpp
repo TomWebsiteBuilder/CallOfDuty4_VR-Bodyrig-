@@ -2690,6 +2690,20 @@ void __cdecl R_SetupWorldSurfacesDpvs(const GfxViewParms *viewParms)
     dpvsGlob.viewProjMtx = &viewParms->viewProjectionMatrix;
     dpvsGlob.invViewProjMtx = &viewParms->inverseViewProjectionMatrix;
     R_FrustumClipPlanes(&viewParms->viewProjectionMatrix, standardFrustumSidePlanes, 4, dpvsView->frustumPlanes);
+#if defined(XR_USE_GRAPHICS_API_D3D11)
+    if (VR_D3D9IsSameFrameStereoEnabled())
+    {
+        // Expand the camera frustum side planes outward by 16 units (40 cm) to cover
+        // both eyes' full IPD separation and peripheral parallax differences.
+        for (int i = 0; i < 4; ++i)
+        {
+            dpvsView->frustumPlanes[i].coeffs[3] += 16.0f;
+            dpvsView->frustumPlanes[i].side[0] = dpvsView->frustumPlanes[i].coeffs[0] <= 0.0f ? 0 : 0xC;
+            dpvsView->frustumPlanes[i].side[1] = dpvsView->frustumPlanes[i].coeffs[1] <= 0.0f ? 4 : 16;
+            dpvsView->frustumPlanes[i].side[2] = dpvsView->frustumPlanes[i].coeffs[2] <= 0.0f ? 8 : 20;
+        }
+    }
+#endif
     iassert( viewParms->projectionMatrix.m[3][3] == 0 );
     R_SetupDpvsForPoint(viewParms);
     dpvsGlob.sideFrustumPlanes = dpvsView->frustumPlanes;
@@ -3324,7 +3338,24 @@ void __cdecl R_VisitPortalsForCell(
     GfxPortal *portal; // [esp+1Ch] [ebp-8h]
     int portalIndex; // [esp+20h] [ebp-4h]
 
-    R_AddCellSurfacesAndCullGroupsInFrustumDelayed(cell, planes, planeCount, frustumPlaneCount);
+#if defined(XR_USE_GRAPHICS_API_D3D11)
+    if (VR_D3D9IsSameFrameStereoEnabled())
+    {
+        // In same-frame stereo VR, all views share the final generated view's
+        // draw-surface list. If geometry visible to an earlier view (e.g. Left Eye)
+        // is culled by the final view's narrow single-eye portal pyramid cone,
+        // it disappears from both eyes, causing severe polygon flickering and popping
+        // around doorways, stalls, and openings at long distances (e.g. the Killhouse
+        // firing range). Use the full stereo camera frustum for cell surface culling
+        // so neither eye ever clips out geometry visible through an open portal.
+        DpvsView *dpvsView = dpvsGlob.views[scene.dpvs.localClientNum];
+        R_AddCellSurfacesAndCullGroupsInFrustumDelayed(cell, dpvsView->frustumPlanes, dpvsView->frustumPlaneCount, dpvsView->frustumPlaneCount);
+    }
+    else
+#endif
+    {
+        R_AddCellSurfacesAndCullGroupsInFrustumDelayed(cell, planes, planeCount, frustumPlaneCount);
+    }
     R_SetCellVisible(cell);
     R_SetAncestorListStatus(parentPortal, 1);
     if (clipChildren)

@@ -17,8 +17,15 @@ void __cdecl R_DrawSunShadowMapCallback(const void *userData, GfxCmdBufContext c
     partition = (const GfxSunShadowPartition * )userData;
     R_SetRenderTarget(context, R_RENDERTARGET_SHADOWMAP_SUN);
 
-    if (partition->partitionIndex == 0)
-        R_ClearScreen(context.state->prim.device, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, shadowmapClearColor, 1.0f, 0, 0);
+    // Explicitly set the cascade partition viewport and clear color and depth buffer
+    // for each partition, preventing stale depth buffers and phantom shadow polygons.
+    GfxViewport partitionViewport;
+    partitionViewport.x = 0;
+    partitionViewport.y = partition->partitionIndex * 1024;
+    partitionViewport.width = 1024;
+    partitionViewport.height = 1024;
+    R_SetViewport(context.state, &partitionViewport);
+    R_ClearScreen(context.state->prim.device, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, shadowmapClearColor, 1.0f, 0, 0);
 
     height = partition->viewport.height;
     width = partition->viewport.width;
@@ -48,14 +55,15 @@ void R_DrawSunShadowMap(
     R_InitCmdBufSourceState(&state, &viewInfo->input, 0);
     R_SetRenderTargetSize(&state, R_RENDERTARGET_SHADOWMAP_SUN);
 
+    const float biasMultiplier = (partitionIndex == 1) ? 2.5f : 1.0f;
     if (r_rendererInUse->current.integer || gfxMetrics.shadowmapBuildTechType != TECHNIQUE_BUILD_SHADOWMAP_COLOR)
     {
-        x = sm_polygonOffsetBias->current.value * 0.25f * viewInfo->sunShadow.partition[partitionIndex].shadowViewParms.projectionMatrix.m[2][2];
-        R_UpdateCodeConstant(&state, CONST_SRC_CODE_SHADOWMAP_POLYGON_OFFSET, x, sm_polygonOffsetScale->current.value, 0.0f, 0.0f);
+        x = sm_polygonOffsetBias->current.value * biasMultiplier * 0.25f * viewInfo->sunShadow.partition[partitionIndex].shadowViewParms.projectionMatrix.m[2][2];
+        R_UpdateCodeConstant(&state, CONST_SRC_CODE_SHADOWMAP_POLYGON_OFFSET, x, sm_polygonOffsetScale->current.value * biasMultiplier, 0.0f, 0.0f);
     }
     else
     {
-        x = sm_polygonOffsetBias->current.value * 4.0f * viewInfo->sunShadow.partition[partitionIndex].shadowViewParms.projectionMatrix.m[2][2];
+        x = sm_polygonOffsetBias->current.value * biasMultiplier * 4.0f * viewInfo->sunShadow.partition[partitionIndex].shadowViewParms.projectionMatrix.m[2][2];
         R_UpdateCodeConstant(&state, CONST_SRC_CODE_SHADOWMAP_POLYGON_OFFSET, x, 0.0f, 0.0f, 0.0f);
     }
 
