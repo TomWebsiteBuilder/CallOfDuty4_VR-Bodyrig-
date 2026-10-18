@@ -24,6 +24,11 @@ void VR_Shutdown();
 // Returns true after either backend and its D3D11 compositor have initialized.
 bool VR_IsInitialized();
 
+// SP hand-over-hand ladder input. Heights are in physical tracking space.
+void VR_SetPhysicalLadderActive(bool active);
+bool VR_IsPhysicalLadderActive();
+bool VR_GetLadderHandInput(bool weaponHand, float* heightMeters, bool* gripHeld);
+
 // Returns "OpenXR", "OpenVR/SteamVR", or "none".
 const char* VR_GetActiveBackendName();
 
@@ -572,7 +577,8 @@ bool VR_GetManualReloadBoltRackState(
 void VR_UpdatePhysicalBodyHolstersAndKnife(
     const float cameraOrigin[3],
     const float cameraAxis[3][3],
-    int activeWeaponIndex);
+    int activeWeaponIndex,
+    bool activeWeaponIsPistol = false);
 
 // Returns true once on the frame a physical holster grab/stow requests a
 // weapon switch in CL_CreateCmd. If targetSlot is non-null, receives 1 for
@@ -695,6 +701,7 @@ void VR_ToggleSeatedMode();
 void VR_SetHoldToGripEnabled(bool enabled);
 bool VR_IsHoldToGripEnabled();
 void VR_ToggleHoldToGrip();
+void VR_SetPhysicalWeaponHolstered(bool holstered);
 bool VR_IsPhysicalWeaponHolstered();
 bool VR_IsRightControllerGripHeld();
 bool VR_IsLeftControllerGripHeld();
@@ -715,4 +722,3 @@ bool VR_IsGrenadePinPulled();
 // Left Wrist World Pose for Diegetic HUD Attachments
 // -------------------------------------------------------------------------
 bool VR_GetRenderedLeftWristWorldPose(float* outOrigin, float (*outAxis)[3]);
-
