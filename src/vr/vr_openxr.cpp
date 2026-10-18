@@ -492,6 +492,11 @@ float g_vrRightControllerFinalWeaponMuzzleWorld[3] = {};
 bool g_vrRightControllerFinalWeaponMuzzleValid = false;
 bool g_vrRightControllerFinalWeaponMuzzleBlocked = false;
 
+float g_vrRightControllerWeaponStockWorld[3] = {};
+float g_vrRightControllerWeaponCollisionMuzzleWorld[3] = {};
+float g_vrRightControllerWeaponCollisionForward[3] = {1.0f, 0.0f, 0.0f};
+bool g_vrRightControllerWeaponCollisionSegmentValid = false;
+
 bool g_vrRightControllerAttackPressed = false;
 
 bool g_vrLoggedRightControllerUsercmdAim = false;
@@ -9717,6 +9722,7 @@ void VR_DestroyControllerInput()
         g_vrPhysicalSniperScopePoseWorldValid = false;
         g_vrRightControllerFinalWeaponMuzzleValid = false;
         g_vrRightControllerFinalWeaponMuzzleBlocked = false;
+        g_vrRightControllerWeaponCollisionSegmentValid = false;
         g_vrRightControllerAttackPressed = false;
         g_vrRightControllerSqueezePressedRaw = false;
         g_vrRightControllerSqueezeAvailable = false;
@@ -12156,6 +12162,7 @@ void VR_InvalidateRightControllerWeaponPose()
         g_vrPhysicalSniperScopePoseWorldValid = false;
         g_vrRightControllerFinalWeaponMuzzleValid = false;
         g_vrRightControllerFinalWeaponMuzzleBlocked = false;
+        g_vrRightControllerWeaponCollisionSegmentValid = false;
         g_vrTwoHandWeaponAnchorValid = false;
         g_vrTwoHandWeaponAnchorCaptureRequested = false;
         g_vrTwoHandWeaponAnchorWeaponIndex = 0;
@@ -19331,24 +19338,13 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
             {
                 s_weaponBashArmed = false;
                 s_lastWeaponBashMs = nowMilliseconds;
-                g_vrPhysicalBodyRig.knifeStrikeArmed = false;
-                g_vrPhysicalBodyRig.lastKnifeStrikeMilliseconds = nowMilliseconds;
-                g_vrPhysicalBodyRig.knifeStrikePulseUntilMilliseconds = nowMilliseconds + 90u;
-                g_vrPhysicalBodyRig.knifeStrikeValidUntilMilliseconds = nowMilliseconds + 350u;
-
-                for (int c = 0; c < 3; ++c)
-                {
-                    g_vrPhysicalBodyRig.knifeStrikeOriginWorld[c] = rightWorld[c];
-                    g_vrPhysicalBodyRig.knifeStrikeForwardWorld[c] = rightAxisWorld[0][c];
-                    g_vrPhysicalBodyRig.knifeStrikeRightWorld[c] = rightAxisWorld[1][c];
-                    g_vrPhysicalBodyRig.knifeStrikeUpWorld[c] = rightAxisWorld[2][c];
-                }
 
                 strikeRightHaptic = true;
                 Com_Printf(
                     0,
-                    "[VR][BASH] Physical blunt gun-bash / muzzle strike at %.1f in/s.\n",
-                    speed);
+                    "[VR][BASH] Physical blunt gun-bash motion at %.1f in/s (forward %.1f in/s).\n",
+                    speed,
+                    forwardSpeed);
             }
         }
 
@@ -19630,10 +19626,7 @@ bool VR_GetPhysicalKnifeStrikeWorld(
     std::lock_guard<std::mutex> lock(
         g_vrWeaponControllerPoseMutex);
 
-    if (!g_vrPhysicalBodyRig.knifeDrawn &&
-        static_cast<std::int32_t>(
-            g_vrPhysicalBodyRig.knifeStrikeValidUntilMilliseconds -
-            nowMilliseconds) <= 0)
+    if (!g_vrPhysicalBodyRig.knifeDrawn)
     {
         return false;
     }
@@ -22045,6 +22038,61 @@ bool VR_GetRightControllerWeaponMuzzleWorld(
     return true;
 }
 
+void VR_PublishRightControllerWeaponCollisionSegmentWorld(
+    const float stockOrigin[3],
+    const float muzzleOrigin[3],
+    const float forwardDir[3])
+{
+    if (stockOrigin == nullptr || muzzleOrigin == nullptr || forwardDir == nullptr)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(
+        g_vrWeaponControllerPoseMutex);
+
+    for (int c = 0; c < 3; ++c)
+    {
+        g_vrRightControllerWeaponStockWorld[c] = stockOrigin[c];
+        g_vrRightControllerWeaponCollisionMuzzleWorld[c] = muzzleOrigin[c];
+        g_vrRightControllerWeaponCollisionForward[c] = forwardDir[c];
+    }
+    g_vrRightControllerWeaponCollisionSegmentValid = true;
+}
+
+bool VR_GetRightControllerWeaponCollisionSegmentWorld(
+    float stockOrigin[3],
+    float muzzleOrigin[3],
+    float forwardDir[3])
+{
+    if (stockOrigin == nullptr || muzzleOrigin == nullptr || forwardDir == nullptr)
+    {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(
+        g_vrWeaponControllerPoseMutex);
+
+    if (g_vrPhysicalBodyRig.knifeDrawn || g_vrPhysicalBodyRig.weaponHolstered)
+    {
+        return false;
+    }
+
+    if (!g_vrRightControllerWeaponCollisionSegmentValid)
+    {
+        return false;
+    }
+
+    for (int c = 0; c < 3; ++c)
+    {
+        stockOrigin[c] = g_vrRightControllerWeaponStockWorld[c];
+        muzzleOrigin[c] = g_vrRightControllerWeaponCollisionMuzzleWorld[c];
+        forwardDir[c] = g_vrRightControllerWeaponCollisionForward[c];
+    }
+
+    return true;
+}
+
 
 bool VR_ApplyControllerRoleHaptic(
     const bool weaponHand,
@@ -22346,6 +22394,7 @@ bool VR_GetLocomotionCombatButtons(
                 g_vrPhysicalMeleePulseUntilMilliseconds -
                 nowMilliseconds) > 0;
         physicalKnifeStrikeHeld =
+            g_vrPhysicalBodyRig.knifeDrawn &&
             static_cast<std::int32_t>(
                 g_vrPhysicalBodyRig.knifeStrikePulseUntilMilliseconds -
                 nowMilliseconds) > 0;

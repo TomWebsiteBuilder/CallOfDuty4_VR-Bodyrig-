@@ -14,6 +14,7 @@
 #elif KISAK_SP
 #include "g_main.h"
 #include "g_local.h"
+#include "actor.h"
 #include "vr/vr_openxr.h"
 #include "vr/vr_scope_aim_math.h"
 #endif
@@ -1645,3 +1646,275 @@ void __cdecl G_SetEquippedOffHand(int clientNum, uint32_t offHandIndex)
     SV_GameSendServerCommand(clientNum, va("offhand %i", offHandIndex));
 #endif
 }
+
+#ifdef KISAK_SP
+// Calculates the shortest distance squared between two 3D line segments S1 [p0, p1] and S2 [q0, q1],
+// and returns the closest points outP on S1 and outQ on S2.
+static float VR_SegmentToSegmentDistanceSq(
+    const float p0[3], const float p1[3],
+    const float q0[3], const float q1[3],
+    float outP[3], float outQ[3])
+{
+    float u[3] = { p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2] };
+    float v[3] = { q1[0] - q0[0], q1[1] - q0[1], q1[2] - q0[2] };
+    float w[3] = { p0[0] - q0[0], p0[1] - q0[1], p0[2] - q0[2] };
+
+    float a = u[0]*u[0] + u[1]*u[1] + u[2]*u[2];
+    float b = u[0]*v[0] + u[1]*v[1] + u[2]*v[2];
+    float c = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+    float d = u[0]*w[0] + u[1]*w[1] + u[2]*w[2];
+    float e = v[0]*w[0] + v[1]*w[1] + v[2]*w[2];
+
+    float D = a * c - b * b;
+    float sc, sN, sD = D;
+    float tc, tN, tD = D;
+
+    const float kEps = 1e-6f;
+
+    if (D < kEps)
+    {
+        sN = 0.0f;
+        sD = 1.0f;
+        tN = e;
+        tD = c;
+    }
+    else
+    {
+        sN = (b * e - c * d);
+        tN = (a * e - b * d);
+        if (sN < 0.0f)
+        {
+            sN = 0.0f;
+            tN = e;
+            tD = c;
+        }
+        else if (sN > sD)
+        {
+            sN = sD;
+            tN = e + b;
+            tD = c;
+        }
+    }
+
+    if (tN < 0.0f)
+    {
+        tN = 0.0f;
+        if (-d < 0.0f)
+            sN = 0.0f;
+        else if (-d > a)
+            sN = sD;
+        else
+        {
+            sN = -d;
+            sD = a;
+        }
+    }
+    else if (tN > tD)
+    {
+        tN = tD;
+        if ((-d + b) < 0.0f)
+            sN = 0.0f;
+        else if ((-d + b) > a)
+            sN = sD;
+        else
+        {
+            sN = (-d + b);
+            sD = a;
+        }
+    }
+
+    sc = (std::abs(sN) < kEps ? 0.0f : sN / sD);
+    tc = (std::abs(tN) < kEps ? 0.0f : tN / tD);
+
+    outP[0] = p0[0] + sc * u[0];
+    outP[1] = p0[1] + sc * u[1];
+    outP[2] = p0[2] + sc * u[2];
+
+    outQ[0] = q0[0] + tc * v[0];
+    outQ[1] = q0[1] + tc * v[1];
+    outQ[2] = q0[2] + tc * v[2];
+
+    float diff[3] = { outP[0] - outQ[0], outP[1] - outQ[1], outP[2] - outQ[2] };
+    return diff[0]*diff[0] + diff[1]*diff[1] + diff[2]*diff[2];
+}
+
+// Direct physical weapon-to-enemy collision detection (Gun Bashing / Muzzle / Stock strikes).
+// Tests the 3D capsule of the player's held firearm against nearby enemy actors.
+// When an enemy collides with or touches the gun, non-lethal blunt damage is applied
+// (preserving target life so the stagger animation plays) and haptic feedback is pulsed,
+// without EVER invoking BUTTON_MELEE or spawning the flat-screen knife viewmodel.
+void VR_CheckGunBashPhysicalCollision(gentity_s *playerEnt)
+{
+    if (!playerEnt || !playerEnt->client)
+    {
+        return;
+    }
+
+    if (!VR_IsInitialized() || VR_IsPhysicalKnifeHeld() || VR_IsPhysicalWeaponHolstered())
+    {
+        return;
+    }
+
+    float stockOrigin[3] = {};
+    float muzzleOrigin[3] = {};
+    float forwardDir[3] = {};
+
+    if (!VR_GetRightControllerWeaponCollisionSegmentWorld(stockOrigin, muzzleOrigin, forwardDir))
+    {
+        return;
+    }
+
+    static uint32_t s_actorLastBashMs[MAX_ACTORS] = {};
+    const uint32_t nowMs = static_cast<uint32_t>(level.time);
+
+    // Collision radius: ~15.0 inches actor body radius + ~4.0 inches weapon barrel/receiver radius + 1.0 tolerance
+    const float kCollisionRadius = 20.0f;
+    const float kCollisionRadiusSq = kCollisionRadius * kCollisionRadius;
+
+    for (int i = 0; i < MAX_ACTORS; ++i)
+    {
+        actor_s *actor = &level.actors[i];
+        if (!actor->inuse)
+        {
+            continue;
+        }
+
+        gentity_s *actorEnt = actor->ent;
+        if (!actorEnt || !actorEnt->r.inuse || !actorEnt->takedamage || actorEnt->health <= 0)
+        {
+            continue;
+        }
+
+        // Friendly check: do not strike friendly teammates
+        if (actorEnt->sentient && playerEnt->sentient &&
+            actorEnt->sentient->eTeam == playerEnt->sentient->eTeam)
+        {
+            continue;
+        }
+
+        // Enforce cooldown per actor (450ms) so the stagger animation can play cleanly
+        if (nowMs < s_actorLastBashMs[i] || (nowMs - s_actorLastBashMs[i]) < 450u)
+        {
+            continue;
+        }
+
+        // Actor vertical axis segment (from lower torso/shins to upper chest/head)
+        float actorBottom[3] = {
+            actorEnt->r.currentOrigin[0],
+            actorEnt->r.currentOrigin[1],
+            actorEnt->r.absmin[2] + 8.0f
+        };
+        float actorTop[3] = {
+            actorEnt->r.currentOrigin[0],
+            actorEnt->r.currentOrigin[1],
+            actorEnt->r.absmax[2] - 4.0f
+        };
+
+        float closestOnGun[3] = {};
+        float closestOnActor[3] = {};
+        const float distSq = VR_SegmentToSegmentDistanceSq(
+            stockOrigin, muzzleOrigin,
+            actorBottom, actorTop,
+            closestOnGun, closestOnActor);
+
+        if (distSq > kCollisionRadiusSq)
+        {
+            continue;
+        }
+
+        // Line-of-sight check to ensure collision is not penetrating through solid world geometry
+        trace_t tr = {};
+        G_LocationalTrace(&tr, closestOnGun, closestOnActor, playerEnt->s.number, 0x2806891, 0);
+        if (tr.fraction < 0.95f && Trace_GetEntityHitId(&tr) != actorEnt->s.number)
+        {
+            continue;
+        }
+
+        s_actorLastBashMs[i] = nowMs;
+
+        // Non-lethal blunt stagger damage
+        int bashDamage = 40;
+        if (actorEnt->health <= bashDamage)
+        {
+            // Ensure target survives to play the stagger animation
+            actorEnt->health = bashDamage + 1;
+        }
+
+        // Knockback / bash direction
+        float impactDir[3] = {
+            closestOnActor[0] - closestOnGun[0],
+            closestOnActor[1] - closestOnGun[1],
+            closestOnActor[2] - closestOnGun[2]
+        };
+        const float dirLen = std::sqrt(
+            impactDir[0] * impactDir[0] +
+            impactDir[1] * impactDir[1] +
+            impactDir[2] * impactDir[2]);
+        if (dirLen > 0.001f)
+        {
+            impactDir[0] /= dirLen;
+            impactDir[1] /= dirLen;
+            impactDir[2] /= dirLen;
+        }
+        else
+        {
+            impactDir[0] = forwardDir[0];
+            impactDir[1] = forwardDir[1];
+            impactDir[2] = forwardDir[2];
+        }
+
+        // Hit location based on relative vertical height
+        hitLocation_t hitLoc = HITLOC_TORSO_UPR;
+        const float actorHeight = actorEnt->r.absmax[2] - actorEnt->r.absmin[2];
+        if (actorHeight > 1.0f)
+        {
+            const float relZ = (closestOnActor[2] - actorEnt->r.absmin[2]) / actorHeight;
+            if (relZ > 0.72f)
+                hitLoc = HITLOC_HEAD;
+            else if (relZ > 0.40f)
+                hitLoc = HITLOC_TORSO_UPR;
+            else if (relZ > 0.20f)
+                hitLoc = HITLOC_TORSO_LWR;
+            else
+                hitLoc = HITLOC_R_LEG_UPR;
+        }
+
+        // Melee impact blood effect and flesh impact sound
+        G_AddEvent(playerEnt, EV_MELEE_BLOOD, 0);
+        gentity_s *tent = G_TempEntity(closestOnGun, 35);
+        if (tent)
+        {
+            tent->s.otherEntityNum = actorEnt->s.number;
+            tent->s.eventParm = 0; // 0 = blunt gun strike, 1 = knife
+            tent->s.weapon = playerEnt->s.weapon;
+            tent->s.weaponModel = playerEnt->s.weaponModel;
+        }
+
+        // Deliver blunt stagger damage (MOD_MELEE = 7)
+        G_Damage(
+            actorEnt,
+            playerEnt,
+            playerEnt,
+            impactDir,
+            closestOnGun,
+            bashDamage,
+            0,
+            7,
+            playerEnt->s.weapon,
+            hitLoc,
+            0,
+            0);
+
+        // Heavy tactile punch to weapon hand
+        VR_ApplyRightControllerWeaponHaptic(0.85f, 0.16f);
+
+        Com_Printf(
+            0,
+            "[VR][BASH] Physical gun collision staggered enemy actor %d (damage %d, health %d -> %d).\n",
+            actorEnt->s.number,
+            bashDamage,
+            actorEnt->health + bashDamage,
+            actorEnt->health);
+    }
+}
+#endif

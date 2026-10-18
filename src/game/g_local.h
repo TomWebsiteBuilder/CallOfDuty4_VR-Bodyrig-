@@ -100,6 +100,9 @@ void __cdecl G_PlayerStateToEntityStateExtrapolate(playerState_s *ps, entityStat
 void __cdecl ClientThink_real(gentity_s *ent);
 void __cdecl ClientThink(int clientNum);
 void __cdecl ClientEndFrame(gentity_s *ent);
+#ifdef KISAK_SP
+void VR_CheckGunBashPhysicalCollision(gentity_s *playerEnt);
+#endif
 gentity_s *__cdecl G_GetPlayer();
 void __cdecl G_UpdatePlayer(gentity_s *ent);
 void __cdecl G_UpdatePlayerTriggers(gentity_s *ent);

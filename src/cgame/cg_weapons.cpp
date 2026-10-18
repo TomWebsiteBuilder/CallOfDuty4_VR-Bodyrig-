@@ -9391,7 +9391,7 @@ static void VR_AddPhysicalBodyRigToScene(
     }
 
     // 4b. Render Secondary Magazine in the Dedicated Secondary Magazine Holder.
-    static VrHolsteredPropRenderObject s_vrHolsteredSecMagObject;
+    static VrBodyHolsterPropRenderObject s_vrHolsteredSecMagObject;
     uint32_t secondaryWeaponNum = 0u;
     const WeaponDef* secondaryDef = nullptr;
     XModel* secondaryClipModel = nullptr;
@@ -10344,6 +10344,7 @@ void __cdecl CG_AddPlayerWeapon(
                 uint8_t vrMuzzleBoneIndex = 0;
                 orientation_t vrMuzzleOrientation = {};
 
+                bool publishedCollisionSegment = false;
                 if (CG_GetBoneIndex(
                         localClientNum,
                         vrWeaponDobjNumber,
@@ -10358,6 +10359,19 @@ void __cdecl CG_AddPlayerWeapon(
                     VR_PublishRightControllerWeaponMuzzleWorld(
                         vrMuzzleOrientation.origin);
 
+                    const float stockBackExtension = 6.0f;
+                    const float vrStockOrigin[3] = {
+                        cgameGlob->viewModelAxis[3][0] - cgameGlob->viewModelAxis[0][0] * stockBackExtension,
+                        cgameGlob->viewModelAxis[3][1] - cgameGlob->viewModelAxis[0][1] * stockBackExtension,
+                        cgameGlob->viewModelAxis[3][2] - cgameGlob->viewModelAxis[0][2] * stockBackExtension
+                    };
+
+                    VR_PublishRightControllerWeaponCollisionSegmentWorld(
+                        vrStockOrigin,
+                        vrMuzzleOrientation.origin,
+                        cgameGlob->viewModelAxis[0]);
+                    publishedCollisionSegment = true;
+
                     static bool loggedVrMuzzlePublication = false;
 
                     if (!loggedVrMuzzlePublication)
@@ -10365,10 +10379,30 @@ void __cdecl CG_AddPlayerWeapon(
                         Com_Printf(
                             0,
                             "[VR] Published transformed tag_flash "
-                            "for physical bullet origins.\n");
+                            "for physical bullet origins and collision.\n");
 
                         loggedVrMuzzlePublication = true;
                     }
+                }
+
+                if (!publishedCollisionSegment)
+                {
+                    const float stockBackExtension = 6.0f;
+                    const float barrelForwardExtension = 24.0f;
+                    const float vrStockOrigin[3] = {
+                        cgameGlob->viewModelAxis[3][0] - cgameGlob->viewModelAxis[0][0] * stockBackExtension,
+                        cgameGlob->viewModelAxis[3][1] - cgameGlob->viewModelAxis[0][1] * stockBackExtension,
+                        cgameGlob->viewModelAxis[3][2] - cgameGlob->viewModelAxis[0][2] * stockBackExtension
+                    };
+                    const float vrEstMuzzle[3] = {
+                        cgameGlob->viewModelAxis[3][0] + cgameGlob->viewModelAxis[0][0] * barrelForwardExtension,
+                        cgameGlob->viewModelAxis[3][1] + cgameGlob->viewModelAxis[0][1] * barrelForwardExtension,
+                        cgameGlob->viewModelAxis[3][2] + cgameGlob->viewModelAxis[0][2] * barrelForwardExtension
+                    };
+                    VR_PublishRightControllerWeaponCollisionSegmentWorld(
+                        vrStockOrigin,
+                        vrEstMuzzle,
+                        cgameGlob->viewModelAxis[0]);
                 }
 
 #ifdef KISAK_SP
@@ -10765,8 +10799,7 @@ void __cdecl CG_AddPlayerWeapon(
                         case WEAPCLASS_MG:
                             slideTravelInches = 2.35f;
                             break;
-                        case WEAPCLASS_SNIPER:
-                        case WEAPCLASS_SHOTGUN:
+                        case WEAPCLASS_SPREAD:
                             slideTravelInches = 2.80f;
                             break;
                         default:
@@ -10867,28 +10900,28 @@ void __cdecl CG_AddPlayerWeapon(
                     {
                         CG_PlayEntitySoundAlias(
                             0,
-                            cgameGlob->playerEntity.nextState.number,
+                            cgameGlob->clientNum,
                             weapDef->rechamberSoundPlayer);
                     }
                     else if (weapDef->reloadEndSoundPlayer != nullptr)
                     {
                         CG_PlayEntitySoundAlias(
                             0,
-                            cgameGlob->playerEntity.nextState.number,
+                            cgameGlob->clientNum,
                             weapDef->reloadEndSoundPlayer);
                     }
                     else if (weapDef->pullbackSoundPlayer != nullptr)
                     {
                         CG_PlayEntitySoundAlias(
                             0,
-                            cgameGlob->playerEntity.nextState.number,
+                            cgameGlob->clientNum,
                             weapDef->pullbackSoundPlayer);
                     }
                     else if (weapDef->reloadEmptySoundPlayer != nullptr)
                     {
                         CG_PlayEntitySoundAlias(
                             0,
-                            cgameGlob->playerEntity.nextState.number,
+                            cgameGlob->clientNum,
                             weapDef->reloadEmptySoundPlayer);
                     }
                 }
@@ -11760,7 +11793,7 @@ bool __cdecl ViewmodelKnifeShouldBeAttached(int32_t localClientNum, WeaponDef* w
         return 0;
 
 #ifdef KISAK_SP
-    if (VR_IsPhysicalKnifeHeld())
+    if (VR_IsInitialized())
         return 0;
 #endif
 

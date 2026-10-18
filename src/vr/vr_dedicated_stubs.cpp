@@ -90,6 +90,21 @@ bool VR_GetRightControllerWeaponMuzzleWorld(float[3])
     return false;
 }
 
+void VR_PublishRightControllerWeaponCollisionSegmentWorld(
+    const float[3],
+    const float[3],
+    const float[3])
+{
+}
+
+bool VR_GetRightControllerWeaponCollisionSegmentWorld(
+    float[3],
+    float[3],
+    float[3])
+{
+    return false;
+}
+
 void VR_SetRightControllerWeaponMuzzleBlocked(bool)
 {
 }

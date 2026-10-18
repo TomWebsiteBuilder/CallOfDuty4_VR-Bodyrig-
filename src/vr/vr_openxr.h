@@ -522,6 +522,18 @@ void VR_PublishRightControllerWeaponMuzzleWorld(
 bool VR_GetRightControllerWeaponMuzzleWorld(
     float muzzleOrigin[3]);
 
+// Publishes and retrieves the 3D line segment of the tracked weapon (stock to muzzle)
+// in world space for direct physical collision detection against enemy actors.
+void VR_PublishRightControllerWeaponCollisionSegmentWorld(
+    const float stockOrigin[3],
+    const float muzzleOrigin[3],
+    const float forwardDir[3]);
+
+bool VR_GetRightControllerWeaponCollisionSegmentWorld(
+    float stockOrigin[3],
+    float muzzleOrigin[3],
+    float forwardDir[3]);
+
 
 // Records whether geometry lies between the player's view origin and the
 // tracked physical muzzle. The local listen-server bullet path uses this to

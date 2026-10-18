@@ -788,6 +788,12 @@ LABEL_35:
     client->fGunYOfs = p_cmd->gunYOfs;
     client->fGunZOfs = p_cmd->gunZOfs;
     Player_UpdateActivate(ent);
+#ifdef KISAK_SP
+    if (ent->client && ent->s.number == 0)
+    {
+        VR_CheckGunBashPhysicalCollision(ent);
+    }
+#endif
     v35 = level.time;
     if (client->ps.shellshockDuration + client->ps.shellshockTime < level.time)
     {
