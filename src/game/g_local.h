@@ -102,6 +102,7 @@ void __cdecl ClientThink(int clientNum);
 void __cdecl ClientEndFrame(gentity_s *ent);
 #ifdef KISAK_SP
 void VR_CheckGunBashPhysicalCollision(gentity_s *playerEnt);
+void VR_CheckPhysicalFloorWeaponPickup(gentity_s *playerEnt);
 #endif
 gentity_s *__cdecl G_GetPlayer();
 void __cdecl G_UpdatePlayer(gentity_s *ent);

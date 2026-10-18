@@ -792,6 +792,7 @@ LABEL_35:
     if (ent->client && ent->s.number == 0)
     {
         VR_CheckGunBashPhysicalCollision(ent);
+        VR_CheckPhysicalFloorWeaponPickup(ent);
     }
 #endif
     v35 = level.time;

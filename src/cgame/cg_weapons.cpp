@@ -10635,6 +10635,87 @@ void __cdecl CG_AddPlayerWeapon(
                         weapInfo->viewModelDObj,
                         localClientNum);
 
+                    // Physical Weapon Environment Collision & Cover Propping:
+                    // Props firearms on top of solid cover (sandbags, low walls, crates, ledges, tables)
+                    // without geometry penetration, and stops barrel clipping into walls,
+                    // with zero collision against the player's bodyrig.
+                    const float forwardCheckDist = (weapDef != nullptr && weapDef->weapClass == WEAPCLASS_PISTOL) ? 7.0f : 14.0f;
+                    const float handguardUnderOffset = 1.75f;
+
+                    float barrelProbe[3] = {
+                        cgameGlob->viewModelAxis[3][0] + cgameGlob->viewModelAxis[0][0] * forwardCheckDist,
+                        cgameGlob->viewModelAxis[3][1] + cgameGlob->viewModelAxis[0][1] * forwardCheckDist,
+                        cgameGlob->viewModelAxis[3][2] + cgameGlob->viewModelAxis[0][2] * forwardCheckDist
+                    };
+
+                    float traceStart[3] = {
+                        barrelProbe[0] + cgameGlob->viewModelAxis[2][0] * 2.0f,
+                        barrelProbe[1] + cgameGlob->viewModelAxis[2][1] * 2.0f,
+                        barrelProbe[2] + cgameGlob->viewModelAxis[2][2] * 2.0f
+                    };
+                    float traceEnd[3] = {
+                        barrelProbe[0] - cgameGlob->viewModelAxis[2][0] * 5.0f,
+                        barrelProbe[1] - cgameGlob->viewModelAxis[2][1] * 5.0f,
+                        barrelProbe[2] - cgameGlob->viewModelAxis[2][2] * 5.0f
+                    };
+
+                    trace_t coverTrace = {};
+                    CG_LocationalTrace(&coverTrace, traceStart, traceEnd, cgameGlob->predictedPlayerState.clientNum, 0x2806831);
+
+                    static bool s_wasProppedOnCover = false;
+                    bool isCurrentlyPropped = false;
+
+                    if (!coverTrace.startsolid && coverTrace.fraction < 1.0f && coverTrace.normal[2] > 0.35f)
+                    {
+                        const float contactZ = traceStart[2] + (traceEnd[2] - traceStart[2]) * coverTrace.fraction;
+                        const float barrelBottomZ = barrelProbe[2] - handguardUnderOffset;
+                        const float penetrationZ = contactZ - barrelBottomZ;
+
+                        if (penetrationZ > 0.0f && penetrationZ < 7.0f)
+                        {
+                            cgameGlob->viewModelAxis[3][2] += penetrationZ;
+                            CG_UpdateViewModelPose(weapInfo->viewModelDObj, localClientNum);
+                            isCurrentlyPropped = true;
+                        }
+                    }
+
+                    // Horizontal wall obstruction pushback:
+                    float wallTraceStart[3] = {
+                        cgameGlob->viewModelAxis[3][0],
+                        cgameGlob->viewModelAxis[3][1],
+                        cgameGlob->viewModelAxis[3][2]
+                    };
+                    const float barrelLen = (weapDef != nullptr && weapDef->weapClass == WEAPCLASS_PISTOL) ? 10.0f : 24.0f;
+                    float wallTraceEnd[3] = {
+                        cgameGlob->viewModelAxis[3][0] + cgameGlob->viewModelAxis[0][0] * barrelLen,
+                        cgameGlob->viewModelAxis[3][1] + cgameGlob->viewModelAxis[0][1] * barrelLen,
+                        cgameGlob->viewModelAxis[3][2] + cgameGlob->viewModelAxis[0][2] * barrelLen
+                    };
+
+                    trace_t wallTrace = {};
+                    CG_LocationalTrace(&wallTrace, wallTraceStart, wallTraceEnd, cgameGlob->predictedPlayerState.clientNum, 0x2806831);
+                    if (!wallTrace.startsolid && wallTrace.fraction < 1.0f && wallTrace.normal[2] <= 0.35f)
+                    {
+                        const float wallPenetration = (1.0f - wallTrace.fraction) * barrelLen;
+                        const float pushBack = std::clamp(wallPenetration, 0.0f, 8.0f);
+                        if (pushBack > 0.25f)
+                        {
+                            cgameGlob->viewModelAxis[3][0] -= cgameGlob->viewModelAxis[0][0] * pushBack;
+                            cgameGlob->viewModelAxis[3][1] -= cgameGlob->viewModelAxis[0][1] * pushBack;
+                            cgameGlob->viewModelAxis[3][2] -= cgameGlob->viewModelAxis[0][2] * pushBack;
+                            CG_UpdateViewModelPose(weapInfo->viewModelDObj, localClientNum);
+                        }
+                    }
+
+                    if (isCurrentlyPropped && !s_wasProppedOnCover)
+                    {
+                        VR_ApplyRightControllerWeaponHaptic(0.40f, 0.045f);
+                        Com_Printf(0, "[VR][COVER] Propped %s on top of cover (resting on geometry).\n",
+                            weapDef != nullptr ? weapDef->szInternalName : "weapon");
+                    }
+                    s_wasProppedOnCover = isCurrentlyPropped;
+                    VR_SetWeaponProppedOnCover(isCurrentlyPropped);
+
                     const uint32_t alignedGripTag =
                         SL_FindString(selectedTagName);
 

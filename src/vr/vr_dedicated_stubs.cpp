@@ -115,6 +115,15 @@ void VR_SetRightControllerWeaponMuzzleBlocked(bool)
 {
 }
 
+void VR_SetWeaponProppedOnCover(bool)
+{
+}
+
+bool VR_IsWeaponProppedOnCover()
+{
+    return false;
+}
+
 bool VR_D3D9IsSameFrameStereoEnabled()
 {
     return false;

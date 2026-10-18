@@ -18945,9 +18945,28 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
         const float distRightGrenade = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, grenadePouchOrigin) : 9999.0f;
         const float distRightTactical = g_vrRightControllerWeaponPoseValid ? distance3(rightWorld, tacticalPouchOrigin) : 9999.0f;
 
+        const float rightHandForward =
+            (rightWorld[0] - cameraOrigin[0]) * bodyAxis[0][0] +
+            (rightWorld[1] - cameraOrigin[1]) * bodyAxis[0][1];
+        const float leftHandForward =
+            (leftWorld[0] - cameraOrigin[0]) * bodyAxis[0][0] +
+            (leftWorld[1] - cameraOrigin[1]) * bodyAxis[0][1];
+
+        // When a weapon is drawn and held in hand, the operator's hands are out in front
+        // of their torso. The bodyrig shoulder sling holster must NEVER trigger while the hand
+        // is in front of the collarbone/ear (rightHandForward >= -1.0f).
+        // Stowing primary requires reaching deliberately behind the shoulder (rightHandForward < -1.0f).
+        const bool rightBehindShoulder = rightHandForward < -1.0f;
+        const bool leftBehindShoulder = leftHandForward < -1.0f;
+        const bool rightCanAccessPrimarySling = g_vrPhysicalBodyRig.weaponHolstered ? (rightHandForward < 2.0f) : rightBehindShoulder;
+        const bool leftCanAccessPrimarySling = g_vrPhysicalBodyRig.weaponHolstered ? (leftHandForward < 2.0f) : leftBehindShoulder;
+
+        constexpr float kPrimarySlingRadiusInches = 6.5f;
+        constexpr float kHipHolsterRadiusInches = 6.5f;
+
         const bool rightInHip =
             g_vrRightControllerWeaponPoseValid &&
-            distRightHip <= kHolsterRadiusInches &&
+            distRightHip <= kHipHolsterRadiusInches &&
             distRightHip < distRightKnife &&
             distRightHip < distRightChest &&
             distRightHip < distRightMagPouch &&
@@ -18956,7 +18975,8 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
             distRightHip < distRightTactical;
         const bool rightInChest =
             g_vrRightControllerWeaponPoseValid &&
-            distRightChest <= kHolsterRadiusInches &&
+            rightCanAccessPrimarySling &&
+            distRightChest <= kPrimarySlingRadiusInches &&
             distRightChest < distRightKnife &&
             distRightChest < distRightHip &&
             distRightChest < distRightMagPouch &&
@@ -18965,7 +18985,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
             distRightChest < distRightTactical;
         const bool leftInHip =
             g_vrLeftControllerForegripPoseValid &&
-            distLeftHip <= kHolsterRadiusInches &&
+            distLeftHip <= kHipHolsterRadiusInches &&
             distLeftHip < distLeftKnife &&
             distLeftHip < distLeftChest &&
             distLeftHip < distLeftMagPouch &&
@@ -18975,7 +18995,8 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
             !leftInteractingWithWeapon;
         const bool leftInChest =
             g_vrLeftControllerForegripPoseValid &&
-            distLeftChest <= kHolsterRadiusInches &&
+            leftCanAccessPrimarySling &&
+            distLeftChest <= kPrimarySlingRadiusInches &&
             distLeftChest < distLeftKnife &&
             distLeftChest < distLeftHip &&
             distLeftChest < distLeftMagPouch &&
@@ -21938,9 +21959,9 @@ bool VR_ApplyRightControllerToWeaponPlacement(
         }
     }
 
-    // Aiming & Stabilization (Virtual Gunstock)
-    // Filters out micro-tremors and securely anchors weapon tracking into the shoulder pocket when aiming down sights (ADS).
-    if (g_vrVirtualStockEnabled && (adsFraction > 0.05f || twoHandBlend > 0.35f))
+    // Aiming & Stabilization (Virtual Gunstock & Cover Rest)
+    // Filters out micro-tremors and securely stabilizes weapon tracking when aiming down sights (ADS) or propped on cover.
+    if ((g_vrVirtualStockEnabled && (adsFraction > 0.05f || twoHandBlend > 0.35f)) || VR_IsWeaponProppedOnCover())
     {
         const float dominantSign = (configurable.dominantHand == VrInteractions::DominantHand::Left) ? -1.0f : 1.0f;
         const float rigScale = g_vrTPoseTelemetry.valid ? g_vrTPoseTelemetry.rigScaleFactor : 1.0f;
@@ -22108,6 +22129,18 @@ bool VR_ShouldSuppressRightControllerBlockedMuzzleShot()
         g_vrRightControllerFinalWeaponAimValid &&
         g_vrRightControllerAttackPressed &&
         g_vrRightControllerFinalWeaponMuzzleBlocked;
+}
+
+static bool g_vrWeaponProppedOnCover = false;
+
+void VR_SetWeaponProppedOnCover(const bool propped)
+{
+    g_vrWeaponProppedOnCover = propped;
+}
+
+bool VR_IsWeaponProppedOnCover()
+{
+    return g_vrWeaponProppedOnCover;
 }
 
 

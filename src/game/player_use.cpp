@@ -1381,3 +1381,155 @@ void __cdecl Player_UpdateLookAtEntity(gentity_s *ent)
         }
     }
 }
+
+void VR_CheckPhysicalFloorWeaponPickup(gentity_s *playerEnt)
+{
+    if (!playerEnt || !playerEnt->client)
+    {
+        return;
+    }
+
+    if (!VR_IsInitialized() || playerEnt->health <= 0 || VR_IsPhysicalLadderActive())
+    {
+        return;
+    }
+
+    float cameraOrigin[3] = {};
+    G_GetPlayerViewOrigin(&playerEnt->client->ps, cameraOrigin);
+
+    float cameraAxis[3][3] = {};
+    AnglesToAxis(playerEnt->client->ps.viewangles, cameraAxis);
+
+    float leftGripWorld[3] = {};
+    float leftAxisWorld[3][3] = {};
+    const bool leftValid = VR_GetLeftControllerGripWorld(cameraOrigin, cameraAxis, leftGripWorld, leftAxisWorld);
+
+    float rightGripWorld[3] = {};
+    float rightAxisWorld[3][3] = {};
+    const bool rightValid = VR_GetRightControllerGripWorld(cameraOrigin, cameraAxis, rightGripWorld, rightAxisWorld);
+
+    if (!leftValid && !rightValid)
+    {
+        return;
+    }
+
+    const bool leftGripHeld = VR_IsLeftControllerGripHeld();
+    const bool rightGripHeld = VR_IsRightControllerGripHeld();
+
+    static bool s_lastLeftGripHeld = false;
+    static bool s_lastRightGripHeld = false;
+
+    const bool leftGripPressed = leftGripHeld && !s_lastLeftGripHeld;
+    const bool rightGripPressed = rightGripHeld && !s_lastRightGripHeld;
+
+    s_lastLeftGripHeld = leftGripHeld;
+    s_lastRightGripHeld = rightGripHeld;
+
+    gentity_s *bestItem = nullptr;
+    float bestDistSq = 999999.0f;
+    bool bestHandIsRight = false;
+
+    // Reach radius: 24.0 inches (~61 cm) physical reach from hand to dropped floor weapon
+    constexpr float kMaxPickupReachInches = 24.0f;
+    constexpr float kMaxPickupReachSq = kMaxPickupReachInches * kMaxPickupReachInches;
+
+    for (int i = 0; i < level.num_entities; ++i)
+    {
+        gentity_s *itemEnt = &g_entities[i];
+        if (!itemEnt->r.inuse || itemEnt->s.eType != 2) // ET_ITEM = 2
+        {
+            continue;
+        }
+
+        if (itemEnt->s.index.brushmodel >= 2048)
+        {
+            continue;
+        }
+
+        const gitem_s *item = &bg_itemlist[itemEnt->s.index.brushmodel];
+        if (item == nullptr || item->giType != IT_WEAPON)
+        {
+            continue;
+        }
+
+        const int weapIdx = itemEnt->s.index.brushmodel % 128;
+        const WeaponDef *weapDef = BG_GetWeaponDef(weapIdx);
+        if (!BG_PlayerCanPickUpWeaponType(weapDef, &playerEnt->client->ps))
+        {
+            continue;
+        }
+
+        // Check off-hand reach (when off-hand is free)
+        if (leftValid)
+        {
+            const float dx = leftGripWorld[0] - itemEnt->r.currentOrigin[0];
+            const float dy = leftGripWorld[1] - itemEnt->r.currentOrigin[1];
+            const float dz = leftGripWorld[2] - itemEnt->r.currentOrigin[2];
+            const float dSq = dx * dx + dy * dy + dz * dz;
+
+            if (dSq <= kMaxPickupReachSq && dSq < bestDistSq)
+            {
+                bestDistSq = dSq;
+                bestItem = itemEnt;
+                bestHandIsRight = false;
+            }
+        }
+
+        // Check weapon-hand reach (when empty-handed / weapon holstered)
+        if (rightValid && VR_IsPhysicalWeaponHolstered())
+        {
+            const float dx = rightGripWorld[0] - itemEnt->r.currentOrigin[0];
+            const float dy = rightGripWorld[1] - itemEnt->r.currentOrigin[1];
+            const float dz = rightGripWorld[2] - itemEnt->r.currentOrigin[2];
+            const float dSq = dx * dx + dy * dy + dz * dz;
+
+            if (dSq <= kMaxPickupReachSq && dSq < bestDistSq)
+            {
+                bestDistSq = dSq;
+                bestItem = itemEnt;
+                bestHandIsRight = true;
+            }
+        }
+    }
+
+    static int s_lastHoverEnt = ENTITYNUM_NONE;
+    if (bestItem != nullptr)
+    {
+        if (s_lastHoverEnt != bestItem->s.number)
+        {
+            s_lastHoverEnt = bestItem->s.number;
+            if (bestHandIsRight)
+                VR_ApplyRightControllerWeaponHaptic(0.18f, 0.025f);
+            else
+                VR_ApplyOffhandControllerHaptic(0.18f, 0.025f);
+        }
+
+        const bool wantsGrab = (bestHandIsRight && rightGripPressed) || (!bestHandIsRight && leftGripPressed);
+        if (wantsGrab)
+        {
+            const int weapIdx = bestItem->s.index.brushmodel % 128;
+            const WeaponDef *weapDef = BG_GetWeaponDef(weapIdx);
+            const char *weapName = (weapDef != nullptr && weapDef->szInternalName != nullptr) ? weapDef->szInternalName : "weapon";
+
+            Player_UseEntity(playerEnt, bestItem);
+
+            if (bestHandIsRight)
+            {
+                VR_SetPhysicalWeaponHolstered(false);
+                VR_ApplyRightControllerWeaponHaptic(0.55f, 0.08f);
+            }
+            else
+            {
+                VR_ApplyOffhandControllerHaptic(0.55f, 0.08f);
+            }
+
+            Com_Printf(0, "[VR][PICKUP] Physically gripped and picked up %s from the floor into %s hand!\n",
+                weapName, bestHandIsRight ? "weapon" : "off");
+        }
+    }
+    else
+    {
+        s_lastHoverEnt = ENTITYNUM_NONE;
+    }
+}
+

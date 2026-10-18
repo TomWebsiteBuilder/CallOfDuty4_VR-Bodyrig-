@@ -548,6 +548,11 @@ void VR_SetRightControllerWeaponMuzzleBlocked(
 
 bool VR_ShouldSuppressRightControllerBlockedMuzzleShot();
 
+// Physical environment collision & cover propping state:
+// Tracks when a firearm is rested/propped on top of solid world geometry (cover, sandbag, ledge).
+void VR_SetWeaponProppedOnCover(bool propped);
+bool VR_IsWeaponProppedOnCover();
+
 // KISAK_SP_VR_EXPERIMENTAL_BODYRIG_V1
 // Publishes the current weapon's world-space bolt/charging-handle/slide anchor
 // so manual magazine reloads can require physical off-hand bolt racking.
