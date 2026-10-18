@@ -641,7 +641,7 @@ static constexpr uint16_t
         kVrBodyRigSegmentCount * kVrBodyRigRingSides * 2u;
 static constexpr uint16_t
     kVrBodyRigTotalTriangles =
-        kVrBodyRigSegmentCount * kVrBodyRigRingSides * 2u + 56u;
+        kVrBodyRigSegmentCount * kVrBodyRigRingSides * 2u;
 
 struct VrBodyRigTorsoAndArmsAsset
 {
@@ -1709,21 +1709,23 @@ static void VR_AccumulateSplitHandBoneWeight(
         static_cast<float>(boneWeight) /
         65535.0f;
 
-    if (VR_ModelBoneDescendsFrom(
-            sourceModel,
-            boneIndex,
-            leftShoulderIndex))
-    {
-        *leftArmWeight += normalizedWeight;
-    }
-
-    if (boneIndex == leftWristTwistIndex ||
+    const bool isHandBone =
         VR_ModelBoneDescendsFrom(
             sourceModel,
             boneIndex,
-            leftWristIndex))
+            leftWristIndex);
+
+    if (isHandBone)
     {
         *leftHandWeight += normalizedWeight;
+    }
+    else if (VR_ModelBoneDescendsFrom(
+                 sourceModel,
+                 boneIndex,
+                 leftShoulderIndex) ||
+             boneIndex == leftWristTwistIndex)
+    {
+        *leftArmWeight += normalizedWeight;
     }
 }
 
@@ -1834,13 +1836,40 @@ static bool VR_SelectSplitHandTriangle(
     const float* leftArmWeights,
     const float* leftHandWeights,
     const float* rightArmWeights = nullptr,
-    const float* rightHandWeights = nullptr)
+    const float* rightHandWeights = nullptr,
+    const GfxPackedVertex* wristRootedVertices = nullptr,
+    const float* wristToFingers = nullptr)
 {
     if (triangleIndices == nullptr ||
         leftArmWeights == nullptr ||
         leftHandWeights == nullptr)
     {
         return false;
+    }
+
+    if (wristRootedVertices != nullptr && wristToFingers != nullptr)
+    {
+        float maxFwd = -1000.0f;
+        for (int cornerIndex = 0; cornerIndex < 3; ++cornerIndex)
+        {
+            const uint16_t vertexIndex = triangleIndices[cornerIndex];
+            if (vertexIndex < vertexCount)
+            {
+                const float* pos = wristRootedVertices[vertexIndex].xyz;
+                const float fwd =
+                    pos[0] * wristToFingers[0] +
+                    pos[1] * wristToFingers[1] +
+                    pos[2] * wristToFingers[2];
+                if (fwd > maxFwd)
+                {
+                    maxFwd = fwd;
+                }
+            }
+        }
+        if (maxFwd < -0.30f)
+        {
+            return false;
+        }
     }
 
     float leftArmWeightSum = 0.0f;
@@ -1926,7 +1955,9 @@ static uint16_t* VR_CreateSplitHandIndexList(
     uint16_t* outputTriangleCount,
     uint32_t* outputVisibleTriangleCount,
     const float* rightArmWeights = nullptr,
-    const float* rightHandWeights = nullptr)
+    const float* rightHandWeights = nullptr,
+    const GfxPackedVertex* wristRootedVertices = nullptr,
+    const float* wristToFingers = nullptr)
 {
     if (sourceSurface.triIndices == nullptr ||
         sourceSurface.triCount == 0u ||
@@ -1950,7 +1981,9 @@ static uint16_t* VR_CreateSplitHandIndexList(
                 leftArmWeights,
                 leftHandWeights,
                 rightArmWeights,
-                rightHandWeights))
+                rightHandWeights,
+                wristRootedVertices,
+                wristToFingers))
         {
             ++visibleTriangleCount;
         }
@@ -2004,7 +2037,9 @@ static uint16_t* VR_CreateSplitHandIndexList(
                 leftArmWeights,
                 leftHandWeights,
                 rightArmWeights,
-                rightHandWeights))
+                rightHandWeights,
+                wristRootedVertices,
+                wristToFingers))
         {
             continue;
         }
@@ -2315,6 +2350,36 @@ static GfxPackedVertex* VR_CreateWristRootedVertexList(
     return wristRootedVertices;
 }
 
+static void VR_ClampWristRootedVertexCuff(
+    GfxPackedVertex* vertices,
+    const uint32_t vertexCount,
+    const float wristToFingers[3])
+{
+    if (vertices == nullptr || vertexCount == 0u || wristToFingers == nullptr)
+    {
+        return;
+    }
+
+    constexpr float kCuffMinFwd = -0.20f;
+
+    for (uint32_t vertexIndex = 0u; vertexIndex < vertexCount; ++vertexIndex)
+    {
+        float* pos = vertices[vertexIndex].xyz;
+        const float fwd =
+            pos[0] * wristToFingers[0] +
+            pos[1] * wristToFingers[1] +
+            pos[2] * wristToFingers[2];
+
+        if (fwd < kCuffMinFwd)
+        {
+            const float delta = kCuffMinFwd - fwd;
+            pos[0] += delta * wristToFingers[0];
+            pos[1] += delta * wristToFingers[1];
+            pos[2] += delta * wristToFingers[2];
+        }
+    }
+}
+
 static GfxPackedVertex* VR_CreateCurledGripVertexList(
     const XSurface& sourceSurface,
     const DObjAnimMat& baseWristPose,
@@ -2448,9 +2513,15 @@ static GfxPackedVertex* VR_CreateCurledGripVertexList(
         }
         else
         {
-            curledVertex.xyz[0] = localXYZ[0];
-            curledVertex.xyz[1] = localXYZ[1];
-            curledVertex.xyz[2] = localXYZ[2];
+            constexpr float kCuffMinFwd = -0.20f;
+            const float clampedFwd = fwd < kCuffMinFwd ? kCuffMinFwd : fwd;
+            for (int c = 0; c < 3; ++c)
+            {
+                curledVertex.xyz[c] =
+                    lat * latAxis[c] +
+                    inP * inPalmAxis[c] +
+                    clampedFwd * fwdAxis[c];
+            }
             curledVertex.normal = Vec3PackUnitVec(localNormal);
             curledVertex.tangent = Vec3PackUnitVec(localTangent);
         }
@@ -2829,6 +2900,17 @@ static bool VR_BuildSplitHandModels(
         uint32_t rightVisibleTriangleCount = 0u;
         uint32_t leftVisibleTriangleCount = 0u;
 
+        const float* leftWristToFingers =
+            asset->modelAnatomicalFrameReady
+                ? asset->modelAnatomicalGripAxis[2]
+                : nullptr;
+
+        GfxPackedVertex* wristRootedVertices =
+            VR_CreateWristRootedVertexList(
+                sourceSurface,
+                baseLeftWristPose,
+                baseLeftWristAxis);
+
         uint16_t* rightIndices =
             VR_CreateSplitHandIndexList(
                 sourceSurface,
@@ -2847,23 +2929,27 @@ static bool VR_BuildSplitHandModels(
                 leftArmWeights,
                 leftHandWeights,
                 &leftStoredTriangleCount,
-                &leftVisibleTriangleCount);
+                &leftVisibleTriangleCount,
+                nullptr,
+                nullptr,
+                wristRootedVertices,
+                leftWristToFingers);
 
         Z_Free(
             temporaryWeights,
             21);
 
         if (rightIndices == nullptr ||
-            leftIndices == nullptr)
+            leftIndices == nullptr ||
+            wristRootedVertices == nullptr)
         {
             return false;
         }
 
-        GfxPackedVertex* wristRootedVertices =
-            VR_CreateWristRootedVertexList(
-                sourceSurface,
-                baseLeftWristPose,
-                baseLeftWristAxis);
+        VR_ClampWristRootedVertexCuff(
+            wristRootedVertices,
+            sourceSurface.vertCount,
+            leftWristToFingers);
 
         GfxPackedVertex* curledLeftVertices =
             VR_CreateCurledGripVertexList(
@@ -3567,6 +3653,24 @@ static bool VR_BakeRigidSupportGripPose(
                 &posedWrist,
                 rigidVertex.xyz);
 
+            if (asset->modelAnatomicalFrameReady)
+            {
+                const float* wristToFingers = asset->modelAnatomicalGripAxis[2];
+                const float fwd =
+                    rigidVertex.xyz[0] * wristToFingers[0] +
+                    rigidVertex.xyz[1] * wristToFingers[1] +
+                    rigidVertex.xyz[2] * wristToFingers[2];
+
+                constexpr float kCuffMinFwd = -0.20f;
+                if (fwd < kCuffMinFwd)
+                {
+                    const float delta = kCuffMinFwd - fwd;
+                    rigidVertex.xyz[0] += delta * wristToFingers[0];
+                    rigidVertex.xyz[1] += delta * wristToFingers[1];
+                    rigidVertex.xyz[2] += delta * wristToFingers[2];
+                }
+            }
+
             float posedNormal[3] = {};
             float rigidNormal[3] = {};
 
@@ -4268,6 +4372,21 @@ static bool VR_BuildAirSupportRightHandModel(
         *reinterpret_cast<mat3x3*>(
             baseRightWristAxis));
 
+    int rightContributingFingerCount = 0;
+    asset->modelAnatomicalFrameReady =
+        VR_BuildRightModelAnatomicalGripFrame(
+            sourceModel,
+            rightWristIndex,
+            baseRightWristPose,
+            asset->modelAnatomicalGripAxis,
+            asset->modelPalmAnchor,
+            &rightContributingFingerCount);
+
+    const float* rightWristToFingers =
+        asset->modelAnatomicalFrameReady
+            ? asset->modelAnatomicalGripAxis[0]
+            : nullptr;
+
     bool boundsInitialized = false;
     float boundsMins[3] = {};
     float boundsMaxs[3] = {};
@@ -4342,6 +4461,12 @@ static bool VR_BuildAirSupportRightHandModel(
         uint16_t storedTriangleCount = 0u;
         uint32_t surfaceVisibleTriangleCount = 0u;
 
+        GfxPackedVertex* wristRootedVertices =
+            VR_CreateWristRootedVertexList(
+                sourceSurface,
+                baseRightWristPose,
+                baseRightWristAxis);
+
         // The selector is weight-based: after supplying the right-side bone
         // hierarchy, KEEP_LEFT_GLOVE means "keep the weighted glove/cuff"
         // rather than a literal anatomical side.
@@ -4352,22 +4477,26 @@ static bool VR_BuildAirSupportRightHandModel(
                 rightArmWeights,
                 rightHandWeights,
                 &storedTriangleCount,
-                &surfaceVisibleTriangleCount);
+                &surfaceVisibleTriangleCount,
+                nullptr,
+                nullptr,
+                wristRootedVertices,
+                rightWristToFingers);
 
         Z_Free(
             temporaryWeights,
             21);
 
-        if (gloveIndices == nullptr)
+        if (gloveIndices == nullptr ||
+            wristRootedVertices == nullptr)
         {
             return false;
         }
 
-        GfxPackedVertex* wristRootedVertices =
-            VR_CreateWristRootedVertexList(
-                sourceSurface,
-                baseRightWristPose,
-                baseRightWristAxis);
+        VR_ClampWristRootedVertexCuff(
+            wristRootedVertices,
+            sourceSurface.vertCount,
+            rightWristToFingers);
 
         GfxPackedVertex* curledRightVertices =
             VR_CreateCurledGripVertexList(
@@ -4602,17 +4731,6 @@ static bool VR_BuildAirSupportRightHandModel(
         rightWristIndex;
     asset->visibleTriangleCount =
         visibleTriangleCount;
-
-    int rightContributingFingerCount = 0;
-    asset->modelAnatomicalFrameReady =
-        VR_BuildRightModelAnatomicalGripFrame(
-            sourceModel,
-            rightWristIndex,
-            baseRightWristPose,
-            asset->modelAnatomicalGripAxis,
-            asset->modelPalmAnchor,
-            &rightContributingFingerCount);
-
     asset->ready = true;
 
     Com_Printf(
@@ -7492,24 +7610,39 @@ static void VR_FreeFloatingLeftHandRenderObjects()
         {
             DObjFree(
                 &asset.floatingLeftObject);
+            asset.floatingObjectCreated = false;
         }
 
         if (asset.supportGripObjectCreated)
         {
             DObjFree(
                 &asset.supportGripObject);
+            asset.supportGripObjectCreated = false;
         }
 
         if (asset.magazineGripObjectCreated)
         {
             DObjFree(
                 &asset.magazineGripObject);
+            asset.magazineGripObjectCreated = false;
         }
 
         // The split model headers, surfaces, indices, and wrist-rooted vertices
         // are hunk-backed and remain valid until the cgame hunk is cleared
-        // after weapon shutdown.
-        asset = VrSplitHandAsset{};
+        // after weapon shutdown. Keep XModel headers intact so viewmodel DObjs
+        // surviving map restart or savegame reload never reference zeroed models.
+        asset.supportGripPoseBaked = false;
+        asset.supportGripLatched = false;
+        asset.magazineGripLatched = false;
+        asset.magazineToWristPoseValid = false;
+        asset.supportGripBakeFailureLogWritten = false;
+        asset.magazineGripPoseFailureLogWritten = false;
+        asset.objectCreationLogWritten = false;
+        asset.submissionAttemptLogWritten = false;
+        asset.submittedLogWritten = false;
+        asset.controllerPoseFailureLogWritten = false;
+        asset.modelAnatomicalFrameReady = false;
+        asset.freeTransformDiagnosticBaselineReady = false;
     }
 
     for (VrAirSupportRightHandAsset& asset :
@@ -7519,16 +7652,14 @@ static void VR_FreeFloatingLeftHandRenderObjects()
         {
             DObjFree(
                 &asset.object);
+            asset.objectCreated = false;
         }
         if (asset.curledObjectCreated)
         {
             DObjFree(
                 &asset.curledObject);
+            asset.curledObjectCreated = false;
         }
-
-        // The copied model, surfaces, indices, vertices, and root bind are
-        // hunk-backed and are released after weapon shutdown.
-        asset = VrAirSupportRightHandAsset{};
     }
 
     for (VrAirSupportDeviceAsset& asset :
@@ -7538,9 +7669,8 @@ static void VR_FreeFloatingLeftHandRenderObjects()
         {
             DObjFree(
                 &asset.object);
+            asset.objectCreated = false;
         }
-
-        asset = VrAirSupportDeviceAsset{};
     }
 
     s_vrAirSupportStableRightHandDonorModel =
@@ -7549,9 +7679,7 @@ static void VR_FreeFloatingLeftHandRenderObjects()
     for (VrHiddenWeaponHandAsset& asset :
          s_vrHiddenWeaponHandAssets)
     {
-        // The copied model headers, surfaces, and degenerate indices are
-        // hunk-backed and are released with the cgame hunk after shutdown.
-        asset = VrHiddenWeaponHandAsset{};
+        // Retain hiddenModel headers across restart; hunk-backed until shutdown.
     }
 
     for (VrBodyRigTorsoAndArmsAsset& asset :
@@ -7560,9 +7688,8 @@ static void VR_FreeFloatingLeftHandRenderObjects()
         if (asset.objectCreated)
         {
             DObjFree(&asset.object);
+            asset.objectCreated = false;
         }
-
-        asset = VrBodyRigTorsoAndArmsAsset{};
     }
 
     s_vrLastRenderedLeftWristValid = false;
@@ -8191,8 +8318,7 @@ static void VR_WriteBodyRigSegmentPrism(
     const float startRadiusForward,
     const float startRadiusRight,
     const float endRadiusForward,
-    const float endRadiusRight,
-    const bool sealEndCapBlack = false)
+    const float endRadiusRight)
 {
     float axisDir[3] = {
         endPos[0] - startPos[0],
@@ -8340,10 +8466,6 @@ static void VR_WriteBodyRigSegmentPrism(
         vEnd.normal = packedNormal;
         vEnd.tangent = packedTangent;
         vEnd.texCoord = Vec2PackTexCoords(uvEnd);
-        if (sealEndCapBlack)
-        {
-            vEnd.color.packed = 0xFF000000u;
-        }
     }
 }
 
@@ -8544,32 +8666,7 @@ VR_GetOrCreateBodyRigTorsoAndArmsAsset(
             }
         }
 
-        // Solid black end-cap disc circles sealing left and right sleeve cuffs
-        // Left wrist cuff disc (segment 9)
-        const uint16_t leftCuffBase = 9u * kVrBodyRigRingSides * 2u + kVrBodyRigRingSides;
-        for (uint16_t i = 1u; i < kVrBodyRigRingSides - 1u; ++i)
-        {
-            triangleIndices[writeIdx++] = leftCuffBase;
-            triangleIndices[writeIdx++] = leftCuffBase + i;
-            triangleIndices[writeIdx++] = leftCuffBase + i + 1u;
 
-            triangleIndices[writeIdx++] = leftCuffBase;
-            triangleIndices[writeIdx++] = leftCuffBase + i + 1u;
-            triangleIndices[writeIdx++] = leftCuffBase + i;
-        }
-
-        // Right wrist cuff disc (segment 13)
-        const uint16_t rightCuffBase = 13u * kVrBodyRigRingSides * 2u + kVrBodyRigRingSides;
-        for (uint16_t i = 1u; i < kVrBodyRigRingSides - 1u; ++i)
-        {
-            triangleIndices[writeIdx++] = rightCuffBase;
-            triangleIndices[writeIdx++] = rightCuffBase + i;
-            triangleIndices[writeIdx++] = rightCuffBase + i + 1u;
-
-            triangleIndices[writeIdx++] = rightCuffBase;
-            triangleIndices[writeIdx++] = rightCuffBase + i + 1u;
-            triangleIndices[writeIdx++] = rightCuffBase + i;
-        }
 
         XSurface& primarySurface = bodySurfaces[0];
         primarySurface.zoneHandle = kVrRuntimeSplitSurfaceZoneHandle;
@@ -9135,12 +9232,12 @@ static void VR_AddPhysicalBodyRigToScene(
             leftForearmDir[1] = 0.0f;
             leftForearmDir[2] = 0.0f;
         }
-        // Extend the wrist socket slightly into the glove palm base so the
-        // sleeve-to-glove connection stays airtight across all wrist rotations.
+        // The sleeve cuff socket terminates cleanly at the wrist joint center
+        // leftWristLocal, cupping the base of the viewhands glove.
         const float leftCuffEnd[3] = {
-            leftWristLocal[0] + leftForearmDir[0] * 1.40f,
-            leftWristLocal[1] + leftForearmDir[1] * 1.40f,
-            leftWristLocal[2] + leftForearmDir[2] * 1.40f,
+            leftWristLocal[0],
+            leftWristLocal[1],
+            leftWristLocal[2],
         };
 
         const float rightElbowPadStart[3] = {
@@ -9170,9 +9267,9 @@ static void VR_AddPhysicalBodyRigToScene(
             rightForearmDir[2] = 0.0f;
         }
         const float rightCuffEnd[3] = {
-            rightWristLocal[0] + rightForearmDir[0] * 1.40f,
-            rightWristLocal[1] + rightForearmDir[1] * 1.40f,
-            rightWristLocal[2] + rightForearmDir[2] * 1.40f,
+            rightWristLocal[0],
+            rightWristLocal[1],
+            rightWristLocal[2],
         };
 
         // Faction-specific geometry dimensions:
@@ -9210,10 +9307,10 @@ static void VR_AddPhysicalBodyRigToScene(
         float armUpperEndRadius = 2.05f;
         float elbowPadRadius = 2.22f;
         float forearmStartRadius = 2.08f;
-        float forearmEndRadius = 1.48f;
-        float cuffStartRadius = 1.62f;
-        float cuffEndRadius = 1.28f;
-        float rightForearmEndRadius = 1.48f;
+        float forearmEndRadius = 1.52f;
+        float cuffStartRadius = 1.55f;
+        float cuffEndRadius = 1.55f;
+        float rightForearmEndRadius = 1.52f;
 
         const char* factionName = "SAS Urban";
 
@@ -9252,8 +9349,8 @@ static void VR_AddPhysicalBodyRigToScene(
             elbowPadRadius = 2.9f;
             forearmStartRadius = 2.7f;
             forearmEndRadius = 2.1f;
-            cuffStartRadius = 2.2f;
-            cuffEndRadius = 1.55f;
+            cuffStartRadius = 2.15f;
+            cuffEndRadius = 1.95f;
             rightForearmEndRadius = 2.1f;
             break;
 
@@ -9288,10 +9385,10 @@ static void VR_AddPhysicalBodyRigToScene(
             armUpperEndRadius = 2.25f;
             elbowPadRadius = 2.38f;
             forearmStartRadius = 2.22f;
-            forearmEndRadius = 1.58f;
-            cuffStartRadius = 1.72f;
-            cuffEndRadius = 1.34f;
-            rightForearmEndRadius = 1.58f;
+            forearmEndRadius = 1.60f;
+            cuffStartRadius = 1.62f;
+            cuffEndRadius = 1.60f;
+            rightForearmEndRadius = 1.60f;
             break;
 
         case VrPlayerFaction::OpForDisguise:
@@ -9323,10 +9420,10 @@ static void VR_AddPhysicalBodyRigToScene(
             armUpperEndRadius = 2.1f;
             elbowPadRadius = 2.24f;
             forearmStartRadius = 2.1f;
-            forearmEndRadius = 1.5f;
-            cuffStartRadius = 1.64f;
-            cuffEndRadius = 1.3f;
-            rightForearmEndRadius = 1.5f;
+            forearmEndRadius = 1.52f;
+            cuffStartRadius = 1.55f;
+            cuffEndRadius = 1.52f;
+            rightForearmEndRadius = 1.52f;
             break;
 
         case VrPlayerFaction::SasNightVision:
@@ -9361,10 +9458,10 @@ static void VR_AddPhysicalBodyRigToScene(
             armUpperEndRadius = 2.15f;
             elbowPadRadius = 2.28f;
             forearmStartRadius = 2.12f;
-            forearmEndRadius = 1.52f;
-            cuffStartRadius = 1.66f;
-            cuffEndRadius = 1.32f;
-            rightForearmEndRadius = 1.52f;
+            forearmEndRadius = 1.54f;
+            cuffStartRadius = 1.56f;
+            cuffEndRadius = 1.54f;
+            rightForearmEndRadius = 1.54f;
             break;
 
         case VrPlayerFaction::SasUrban:
@@ -9453,7 +9550,7 @@ static void VR_AddPhysicalBodyRigToScene(
             &rigAsset->dynamicVertices[8u * kSegVerts],
             rigAsset->templateVertex,
             leftElbowLocal,
-            leftWristLocal,
+            leftCuffStart,
             forearmStartRadius,
             forearmStartRadius,
             forearmEndRadius,
@@ -9466,8 +9563,7 @@ static void VR_AddPhysicalBodyRigToScene(
             cuffStartRadius,
             cuffStartRadius,
             cuffEndRadius,
-            cuffEndRadius,
-            true);
+            cuffEndRadius);
 
         // Right 2-bone IK arm (upper sleeve, elbow pad, forearm sleeve, wrist cuff socket)
         VR_WriteBodyRigSegmentPrism(
@@ -9492,7 +9588,7 @@ static void VR_AddPhysicalBodyRigToScene(
             &rigAsset->dynamicVertices[12u * kSegVerts],
             rigAsset->templateVertex,
             rightElbowLocal,
-            rightWristLocal,
+            rightCuffStart,
             forearmStartRadius,
             forearmStartRadius,
             rightForearmEndRadius,
@@ -9505,8 +9601,7 @@ static void VR_AddPhysicalBodyRigToScene(
             cuffStartRadius,
             cuffStartRadius,
             cuffEndRadius,
-            cuffEndRadius,
-            true);
+            cuffEndRadius);
 
         float bodyQuat[4] = {};
         float normBodyQuat[4] = {};
@@ -9609,14 +9704,10 @@ static void VR_AddPhysicalBodyRigToScene(
             lightingOrigin);
     }
 
-    if (holsteredPrimaryModel != nullptr)
+    // 2. Primary weapon is invisible on the body rig per user request.
+    if (s_vrHolsteredPrimaryObject.created)
     {
-        VR_SubmitBodyHolsterPropToScene(
-            &s_vrHolsteredPrimaryObject,
-            holsteredPrimaryModel,
-            bodyState.chestSlingOrigin,
-            bodyState.chestSlingAxis,
-            lightingOrigin);
+        VR_FreeBodyHolsterPropRenderObject(&s_vrHolsteredPrimaryObject);
     }
 
     // 3. Render Physical Combat Knife (in active 6DoF hand when drawn, or in
@@ -10605,7 +10696,11 @@ void __cdecl CG_AddPlayerWeapon(
                 orientation_t vrMuzzleOrientation = {};
 
                 bool publishedCollisionSegment = false;
-                if (CG_GetBoneIndex(
+                DObj_s* vrWeaponDobj = Com_GetClientDObj(vrWeaponDobjNumber, localClientNum);
+                if (vrWeaponDobj != nullptr &&
+                    weapInfo != nullptr &&
+                    weapInfo->viewModelDObj != nullptr &&
+                    CG_GetBoneIndex(
                         localClientNum,
                         vrWeaponDobjNumber,
                         scr_const.tag_flash,

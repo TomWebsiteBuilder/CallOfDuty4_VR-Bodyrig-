@@ -10,6 +10,12 @@ bool VR_IsInitialized()
     return false;
 }
 
+void VR_SetPhysicalLadderActive(bool) {}
+bool VR_IsPhysicalLadderActive() { return false; }
+bool VR_GetLadderHandInput(bool, float*, bool*) { return false; }
+void VR_SetPhysicalWeaponHolstered(bool) {}
+bool VR_IsPhysicalWeaponHolstered() { return false; }
+
 bool VR_ApplyHeadPosition(float[3], const float[3][3], float)
 {
     return false;

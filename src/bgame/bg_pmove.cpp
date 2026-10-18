@@ -7,6 +7,7 @@
 #include <game_mp/g_main_mp.h>
 #elif KISAK_SP
 #include "vr/vr_openxr.h"
+#include "vr/vr_ladder_climb.h"
 #endif
 #include <cgame/cg_local.h>
 
@@ -159,15 +160,6 @@ void __cdecl PM_playerTrace(
     int32_t contentMask)
 {
     uint16_t EntityHitId; // ax
-
-#if defined(KISAK_SP) && defined(KISAK_OPENXR_ENABLED)
-    if (VR_IsInitialized())
-    {
-        // Strip artificial invisible playerclip (0x10000) and monsterclip (0x20000) barriers
-        // in VR so real geometry remains solid without artificial invisible walls snagging the player.
-        contentMask &= ~0x30000;
-    }
-#endif
 
     pmoveHandlers[pm->handler].trace(results, start, mins, maxs, end, passEntityNum, contentMask);
     if (results->startsolid && (results->contents & 0x2000000) != 0)
@@ -4301,6 +4293,25 @@ void __cdecl PM_CheckLadderMove(pmove_t *pm, pml_t *pml)
         else
             tracedist = 30.0;
 
+#ifdef KISAK_SP
+        v2 = (ps->pm_flags & PMF_LADDER) != 0 && ps->groundEntityNum == ENTITYNUM_NONE;
+        fellOffLadderInAir = v2;
+        if (v2)
+        {
+            vLadderCheckDir[0] = -ps->vLadderVec[0];
+            vLadderCheckDir[1] = -ps->vLadderVec[1];
+            vLadderCheckDir[2] = -ps->vLadderVec[2];
+            tracedist = 36.0f;
+        }
+        else
+        {
+            vLadderCheckDir[0] = pml->forward[0];
+            vLadderCheckDir[1] = pml->forward[1];
+            vLadderCheckDir[2] = 0.0f;
+            Vec3Normalize(vLadderCheckDir);
+            tracedist = pml->walking ? 8.0f : 30.0f;
+        }
+#else
         v2 = (ps->pm_flags & PMF_LADDER) != 0 && ps->groundEntityNum == ENTITYNUM_NONE;
         fellOffLadderInAir = v2;
         if (v2)
@@ -4316,6 +4327,7 @@ void __cdecl PM_CheckLadderMove(pmove_t *pm, pml_t *pml)
             vLadderCheckDir[2] = 0.0;
             Vec3Normalize(vLadderCheckDir);
         }
+#endif
 
         if (ps->pm_type < PM_DEAD)
         {
@@ -4344,8 +4356,17 @@ void __cdecl PM_CheckLadderMove(pmove_t *pm, pml_t *pml)
 
                 Vec3Mad(ps->origin, tracedist, vLadderCheckDir, spot);
                 PM_playerTrace(pm, &trace, ps->origin, mins, maxs, spot, ps->clientNum, pm->tracemask);
-                if (trace.fraction >= 1.0 || (trace.surfaceFlags & 8) == 0 || pml->walking && pm->cmd.forwardmove <= 0)
+#ifdef KISAK_SP
+                const bool wantsDismount = (pm->cmd.forwardmove < -20);
+                if (trace.fraction >= 1.0 || (trace.surfaceFlags & 8) == 0 ||
+                    (pml->walking && (pm->cmd.forwardmove <= 0 || pm->cmd.forwardmove > 20)) ||
+                    wantsDismount)
                     goto LABEL_45;
+#else
+                if (trace.fraction >= 1.0 || (trace.surfaceFlags & 8) == 0 ||
+                    (pml->walking && pm->cmd.forwardmove <= 0))
+                    goto LABEL_45;
+#endif
 
                 if ((ps->pm_flags & PMF_LADDER) != 0)
                     goto LABEL_42;
@@ -4438,6 +4459,27 @@ void __cdecl PM_LadderMove(pmove_t *pm, pml_t *pml)
     }
     else
     {
+#ifdef KISAK_SP
+        if (pm->cmd.upmove == kisak::vr::ladder::CommandMarker)
+        {
+            // Both server and prediction consume the same recorded command.
+            // If the player is on solid ground / platform and pushing forward to walk off:
+            if (pml->walking && ps->groundEntityNum != ENTITYNUM_NONE && pm->cmd.forwardmove > 20)
+            {
+                PM_ClearLadderFlag(ps);
+                PM_WalkMove(pm, pml);
+                return;
+            }
+
+            ps->velocity[2] = kisak::vr::ladder::CommandSpeed(pm->cmd.forwardmove);
+            const float towardLadder = (!pml->walking && ps->velocity[2] != 0.0f) ? -50.0f : 0.0f;
+            ps->velocity[0] = towardLadder * ps->vLadderVec[0];
+            ps->velocity[1] = towardLadder * ps->vLadderVec[1];
+            PM_StepSlideMove(pm, pml, 0);
+            ps->movementDir = 0;
+            return;
+        }
+#endif
         upscale = (pml->forward[2] + 0.25) * 2.5;
         if (upscale <= 1.0)
         {

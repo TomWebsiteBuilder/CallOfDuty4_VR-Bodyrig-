@@ -141,7 +141,7 @@ void __cdecl DObjGetHierarchyBits(const DObj_s *obj, int boneIndex, int *partBit
     if (j != numModels)
     {
         partBits[0] = 0x80000000;
-        for (parentList = subModel->parentList; ; boneIndex -= parentList[newBoneIndexa])
+        for (parentList = subModel->parentList; ; )
         {
             localBoneIndex = boneIndex - startIndex[j];
             while (1)
@@ -162,8 +162,11 @@ void __cdecl DObjGetHierarchyBits(const DObj_s *obj, int boneIndex, int *partBit
                     goto LABEL_30;
                 }
                 newBoneIndexa = localBoneIndex - subModel->numRootBones;
-                if (newBoneIndexa >= 0)
+                if (newBoneIndexa >= 0 && parentList != nullptr)
+                {
+                    boneIndex -= parentList[newBoneIndexa];
                     break;
+                }
                 boneIndex = modelParents[j];
                 if (boneIndex == 255)
                     return;

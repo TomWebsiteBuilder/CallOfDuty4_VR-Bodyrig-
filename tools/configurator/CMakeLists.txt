@@ -1,5 +1,29 @@
 project(KisakCOD-VR-Configurator LANGUAGES CXX)
 
+add_executable(KisakCOD-VR-Ladder-Tests ../../tests/ladder_climb_tests.cpp)
+target_include_directories(KisakCOD-VR-Ladder-Tests PRIVATE ../../src)
+target_compile_features(KisakCOD-VR-Ladder-Tests PRIVATE cxx_std_17)
+add_custom_target(KisakCOD-VR-Ladder-Check
+    COMMAND $<TARGET_FILE:KisakCOD-VR-Ladder-Tests>
+    DEPENDS KisakCOD-VR-Ladder-Tests
+    VERBATIM
+)
+if(NOT CMAKE_CROSSCOMPILING)
+    add_dependencies(KisakCOD-sp KisakCOD-VR-Ladder-Check)
+endif()
+
+add_executable(KisakCOD-VR-World-Canvas-Tests ../../tests/world_canvas_tests.cpp)
+target_include_directories(KisakCOD-VR-World-Canvas-Tests PRIVATE ../../src ../../deps/openxr-sdk/include)
+target_compile_features(KisakCOD-VR-World-Canvas-Tests PRIVATE cxx_std_17)
+add_custom_target(KisakCOD-VR-World-Canvas-Check
+    COMMAND $<TARGET_FILE:KisakCOD-VR-World-Canvas-Tests>
+    DEPENDS KisakCOD-VR-World-Canvas-Tests
+    VERBATIM
+)
+if(NOT CMAKE_CROSSCOMPILING)
+    add_dependencies(KisakCOD-sp KisakCOD-VR-World-Canvas-Check)
+endif()
+
 # The settings suite does not exercise the physical grenade state machine.
 # Keep this focused suite available in the same Windows build as the game.
 add_executable(KisakCOD-VR-Grenade-Tests ../../tests/grenade_interaction_tests.cpp)
@@ -197,4 +221,3 @@ if(MSVC)
         "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     )
 endif()
-

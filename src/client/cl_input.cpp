@@ -7,6 +7,7 @@
 #include "vr/vr_input_bindings.h"
 #include "vr/vr_interactions.h"
 #include "vr/vr_grenade_command_edges.h"
+#include "vr/vr_ladder_climb.h"
 
 void __cdecl CG_NextWeapon_f();
 void __cdecl CG_SelectWeaponIndex(int32_t localClientNum, uint32_t weaponIndex);
@@ -1564,6 +1565,129 @@ int __cdecl CG_HandleLocationSelectionInput(int localClientNum, usercmd_s *cmd)
     }
 }
 
+static kisak::vr::ladder::State s_vrLadderClimb;
+
+static int CL_UpdateVrLadderClimb()
+{
+    namespace Ladder = kisak::vr::ladder;
+    cg_s* cg = CG_GetLocalClientGlobals(0);
+    const playerState_s& ps = cg->predictedPlayerState;
+    bool canReachLadder = false;
+    float ladderNormal[3] = {};
+
+    if (VR_IsInitialized() &&
+        clientUIActives[0].connectionState == CA_ACTIVE &&
+        ps.pm_type == PM_NORMAL &&
+        !Key_IsCatcherActive(0, 0x3b))
+    {
+        if ((ps.pm_flags & PMF_LADDER) != 0)
+        {
+            ladderNormal[0] = ps.vLadderVec[0];
+            ladderNormal[1] = ps.vLadderVec[1];
+            ladderNormal[2] = ps.vLadderVec[2];
+            canReachLadder = true;
+        }
+        else
+        {
+            float fwd[3] = {cg->refdef.viewaxis[0][0], cg->refdef.viewaxis[0][1], 0.0f};
+            const float fwdLen = std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1]);
+            if (fwdLen > 0.001f)
+            {
+                fwd[0] /= fwdLen;
+                fwd[1] /= fwdLen;
+            }
+
+            float start[3] = {ps.origin[0], ps.origin[1], ps.origin[2] + 36.0f};
+            float end[3] = {
+                start[0] + fwd[0] * 36.0f,
+                start[1] + fwd[1] * 36.0f,
+                start[2]
+            };
+            trace_t trace = {};
+            float mins[3] = {-6.0f, -6.0f, -6.0f}, maxs[3] = {6.0f, 6.0f, 6.0f};
+            CG_Trace(&trace, start, mins, maxs, end, ps.clientNum, 0x281C011, false, false);
+            if (trace.fraction < 1.0f && (trace.surfaceFlags & 8) != 0)
+            {
+                ladderNormal[0] = trace.normal[0];
+                ladderNormal[1] = trace.normal[1];
+                ladderNormal[2] = trace.normal[2];
+                canReachLadder = true;
+            }
+        }
+    }
+
+    Ladder::HandInput hands[2];
+    for (int h = 0; h < 2; ++h)
+    {
+        auto& hand = hands[h];
+        hand.valid = VR_GetLadderHandInput(h == 1, &hand.height, &hand.grip);
+        if (!canReachLadder || !hand.valid)
+            continue;
+
+        float grip[3], axis[3][3];
+        const bool worldValid = (h == 1)
+            ? VR_GetRightControllerGripWorld(cg->refdef.vieworg, cg->refdef.viewaxis, grip, axis)
+            : VR_GetLeftControllerGripWorld(cg->refdef.vieworg, cg->refdef.viewaxis, grip, axis);
+        if (!worldValid)
+        {
+            hand.valid = false;
+            continue;
+        }
+
+        // When mounted on a ladder, ladderNormal is the outward normal of the ladder surface.
+        // Forward toward the ladder is -ladderNormal.
+        // Check if the hand is reaching into the forward volume toward the ladder.
+        const float normalDist = (grip[0] - ps.origin[0]) * ladderNormal[0] +
+                                 (grip[1] - ps.origin[1]) * ladderNormal[1] +
+                                 (grip[2] - ps.origin[2]) * ladderNormal[2];
+
+        // Horizontal lateral vector perpendicular to ladder normal:
+        const float lateralDist = std::fabs(
+            (grip[0] - ps.origin[0]) * (-ladderNormal[1]) +
+            (grip[1] - ps.origin[1]) * ladderNormal[0]);
+
+        // Vertical height of the hand relative to player feet:
+        const float verticalHeight = grip[2] - ps.origin[2];
+
+        // Geometric reach: hand extended toward ladder in front of torso, within lateral width and reach height:
+        const bool geometricReach = (normalDist < 16.0f && normalDist > -36.0f) &&
+                                    (lateralDist < 32.0f) &&
+                                    (verticalHeight > 10.0f && verticalHeight < 95.0f);
+
+        // Also do a collision trace swept toward the ladder surface using the player collision mask:
+        float start[3], end[3];
+        for (int c = 0; c < 3; ++c)
+        {
+            start[c] = grip[c] + 12.0f * ladderNormal[c];
+            end[c] = grip[c] - 16.0f * ladderNormal[c];
+        }
+        float mins[3] = {-2, -2, -2}, maxs[3] = {2, 2, 2};
+        trace_t trace = {};
+        CG_Trace(&trace, start, mins, maxs, end, ps.clientNum, 0x281C011, false, false);
+        const bool traceHitLadder = trace.startsolid || (trace.fraction < 1.0f && (trace.surfaceFlags & 8) != 0);
+
+        hand.touchingLadder = geometricReach || traceHitLadder;
+    }
+
+    const auto result = Ladder::Update(s_vrLadderClimb, canReachLadder, clients[0].serverTime, hands);
+    if (result.grabbed[0]) VR_ApplyOffhandControllerHaptic(0.35f, 0.05f);
+    if (result.grabbed[1]) VR_ApplyRightControllerWeaponHaptic(0.35f, 0.05f);
+
+    const bool onSolidGround = (ps.groundEntityNum != ENTITYNUM_NONE);
+    bool isPhysicalLadderActive = false;
+    if (result.anyHandHeld)
+    {
+        isPhysicalLadderActive = true;
+    }
+    else if ((ps.pm_flags & PMF_LADDER) != 0 && !onSolidGround)
+    {
+        isPhysicalLadderActive = true;
+    }
+
+    VR_SetPhysicalLadderActive(isPhysicalLadderActive);
+    return isPhysicalLadderActive ? result.speed : 0;
+}
+
 void __cdecl CL_CreateCmd(usercmd_s *result)
 {
     float oldAngles; // fp31
@@ -1573,6 +1697,7 @@ void __cdecl CL_CreateCmd(usercmd_s *result)
     oldAngles = clients[0].viewangles[0];
     CL_AdjustAngles();
     memset(result, 0, sizeof(usercmd_s));
+    const int vrLadderClimbSpeed = CL_UpdateVrLadderClimb();
     // Publish even when map/location selection consumes this command. Runtime
     // polling must not retain the last active-gameplay snapshot behind UI.
     VR_SetPoseAdsGameplayState(
@@ -2079,16 +2204,21 @@ void __cdecl CL_CreateCmd(usercmd_s *result)
             &vrManualFragHeld,
             &vrManualTacticalHeld);
 
+        const WeaponDef* currentDef = BG_GetWeaponDef(vrGrenadePlayerState->weapon);
+        const bool currentIsPistol = (currentDef != nullptr && currentDef->weapClass == WEAPCLASS_PISTOL);
+
         VR_UpdatePhysicalBodyHolstersAndKnife(
             vrGrenadeCgameGlob->refdef.vieworg,
             vrGrenadeCgameGlob->refdef.viewaxis,
-            vrGrenadePlayerState->weapon);
+            vrGrenadePlayerState->weapon,
+            currentIsPistol);
 
         int targetHolsterSlot = 0;
         if (VR_ConsumePhysicalHolsterWeaponSwitch(&targetHolsterSlot))
         {
             const uint32_t currentWeapon = vrGrenadePlayerState->weapon;
-            int bestCandidate = 0;
+            int matchingWeapon = 0;
+            int fallbackWeapon = 0;
             const int highestWeapIndex = BG_GetNumWeapons() - 1;
             for (int w = 1; w <= highestWeapIndex; ++w)
             {
@@ -2104,37 +2234,30 @@ void __cdecl CL_CreateCmd(usercmd_s *result)
                     continue;
                 }
 
-                if (targetHolsterSlot == 1)
+                const bool isPistol = (def->weapClass == WEAPCLASS_PISTOL);
+                const bool matchesSlot = (targetHolsterSlot == 1) ? isPistol : !isPistol;
+
+                if (matchesSlot)
                 {
-                    // Hip Holster: Sidearm (Pistol)
-                    if (def->weapClass == WEAPCLASS_PISTOL)
+                    matchingWeapon = w;
+                    // If currentWeapon already matches this holster, keep it!
+                    if (w == static_cast<int>(currentWeapon))
                     {
-                        bestCandidate = w;
-                        if (w != static_cast<int>(currentWeapon))
-                        {
-                            break;
-                        }
+                        break;
                     }
                 }
-                else if (targetHolsterSlot == 2)
+                else if (fallbackWeapon == 0)
                 {
-                    // Shoulder Sling: Primary rifle / heavy weapon
-                    if (def->weapClass != WEAPCLASS_PISTOL)
-                    {
-                        bestCandidate = w;
-                        if (w != static_cast<int>(currentWeapon))
-                        {
-                            break;
-                        }
-                    }
+                    fallbackWeapon = w;
                 }
             }
 
-            if (bestCandidate > 0 && bestCandidate != static_cast<int>(currentWeapon))
+            const int selectedWeapon = (matchingWeapon > 0) ? matchingWeapon : fallbackWeapon;
+            if (selectedWeapon > 0 && selectedWeapon != static_cast<int>(currentWeapon))
             {
-                CG_SelectWeaponIndex(0, static_cast<uint32_t>(bestCandidate));
+                CG_SelectWeaponIndex(0, static_cast<uint32_t>(selectedWeapon));
                 Com_Printf(0, "[VR][HOLSTER] Selected %s weapon index %d.\n",
-                    targetHolsterSlot == 1 ? "hip sidearm" : "shoulder sling primary", bestCandidate);
+                    targetHolsterSlot == 1 ? "hip sidearm" : "shoulder sling primary", selectedWeapon);
             }
         }
 
@@ -2601,6 +2724,34 @@ void __cdecl CL_CreateCmd(usercmd_s *result)
         kb[KEY_SMOKE].active, "+smoke", "-smoke");
 
     CL_FinishMove(result);
+    // Keep the reserved marker exclusive to VR, including saturated native
+    // input (ClampChar itself permits -128).
+    if (result->upmove == kisak::vr::ladder::CommandMarker)
+        result->upmove = -127;
+    if (VR_IsPhysicalLadderActive())
+    {
+        cg_s* cgCmd = CG_GetLocalClientGlobals(0);
+        const bool onSolidGround = (cgCmd != nullptr && cgCmd->predictedPlayerState.groundEntityNum != ENTITYNUM_NONE);
+        if (onSolidGround && result->forwardmove > 20)
+        {
+            // Player is standing on solid ground / platform pushing forward to walk off the ladder.
+            VR_SetPhysicalLadderActive(false);
+        }
+        else
+        {
+            result->upmove = static_cast<char>(kisak::vr::ladder::CommandMarker);
+            // If pulling backward on the stick, allow backward descent;
+            // if pulling downward with hands, climb up; if pushing stick forward, assist climb.
+            int ladderSpeed = vrLadderClimbSpeed;
+            if (result->forwardmove < -20)
+                ladderSpeed = result->forwardmove;
+            else if (ladderSpeed == 0 && result->forwardmove > 20)
+                ladderSpeed = result->forwardmove;
+            result->forwardmove = static_cast<char>(ladderSpeed);
+            result->rightmove = 0;
+            result->buttons &= ~(BUTTON_ATTACK | BUTTON_ADS | BUTTON_RELOAD | BUTTON_SPRINT | BUTTON_MELEE);
+        }
+    }
 }
 
 void CL_CreateNewCommands()

@@ -399,7 +399,10 @@ void __cdecl DObjCompleteHierarchyBits(const DObj_s *obj, int *partBits)
                 newBoneIndexa = localBoneIndex - subModel->numRootBones;
                 if (newBoneIndexa >= 0)
                 {
-                    newBoneIndexb = objBoneIndex - parentList[newBoneIndexa];
+                    if (parentList != nullptr)
+                        newBoneIndexb = objBoneIndex - parentList[newBoneIndexa];
+                    else
+                        newBoneIndexb = modelParents[j];
                     goto LABEL_34;
                 }
                 newBoneIndexb = modelParents[j];
