@@ -2502,6 +2502,8 @@ struct VrManualMagazineReloadState
     std::uint32_t ejectedAtMilliseconds = 0u;
     std::uint32_t commitUntilMilliseconds = 0u;
     std::uint32_t magKnockCooldownUntilMilliseconds = 0u;
+    bool supportGripDisarmedUntilRelease = false;
+    std::uint32_t supportGripCooldownUntilMilliseconds = 0u;
     float magazineWellOrigin[3] = {};
     float magazineWellAxis[3][3] = {
         {1.0f, 0.0f, 0.0f},
@@ -11579,8 +11581,16 @@ void VR_PublishLeftControllerForegripPose(
         interactionGripPressed;
     g_vrLeftControllerObjectGripAvailable = objectGripAvailable;
 
+    const bool reloadCooldownActive =
+        (g_vrManualMagazineReload.supportGripCooldownUntilMilliseconds != 0u &&
+         static_cast<std::int32_t>(nowMilliseconds - g_vrManualMagazineReload.supportGripCooldownUntilMilliseconds) < 0) ||
+        (g_vrManualMagazineReload.commitUntilMilliseconds != 0u &&
+         static_cast<std::int32_t>(nowMilliseconds - g_vrManualMagazineReload.commitUntilMilliseconds) < 0) ||
+        g_vrManualMagazineReload.supportGripDisarmedUntilRelease;
+
     g_vrLeftControllerForegripPressed =
         supportGripPressed &&
+        !reloadCooldownActive &&
         g_vrManualMagazineReload.stage ==
             VrManualMagazineReloadStage::Ready &&
         g_vrManualGrenade.stage ==
@@ -13040,12 +13050,12 @@ bool VR_IsSupportGripCandidateLocked()
     const float maximumDistance =
         g_vrTwoHandWeaponTargetActive
             ? 46.0f
-            : 32.0f;
+            : 24.0f;
 
     const float minimumForwardDistance =
         g_vrTwoHandWeaponTargetActive
             ? -8.0f
-            : -3.5f;
+            : 3.5f;
 
     return
         handDistance >= minimumDistance &&
@@ -17249,6 +17259,24 @@ bool VR_GetLeftControllerSupportGripPressed(
         return false;
     }
 
+    const std::uint32_t nowMilliseconds =
+        static_cast<std::uint32_t>(
+            Sys_Milliseconds());
+
+    const bool reloadCooldownActive =
+        (g_vrManualMagazineReload.supportGripCooldownUntilMilliseconds != 0u &&
+         static_cast<std::int32_t>(nowMilliseconds - g_vrManualMagazineReload.supportGripCooldownUntilMilliseconds) < 0) ||
+        (g_vrManualMagazineReload.commitUntilMilliseconds != 0u &&
+         static_cast<std::int32_t>(nowMilliseconds - g_vrManualMagazineReload.commitUntilMilliseconds) < 0) ||
+        g_vrManualMagazineReload.supportGripDisarmedUntilRelease ||
+        g_vrManualMagazineReload.stage != VrManualMagazineReloadStage::Ready;
+
+    if (reloadCooldownActive)
+    {
+        *supportGripPressed = false;
+        return true;
+    }
+
     // This state is already suppressed while physical magazine handling owns
     // the left squeeze, so the rendered hand cannot attach to the rifle during
     // a magazine draw or insertion.
@@ -17410,6 +17438,11 @@ void VR_UpdateManualMagazineReload(
 
         g_vrManualMagazineReload.leftSqueezeWasHeld =
             leftSqueezeHeld;
+
+        if (!leftSqueezeHeld)
+        {
+            g_vrManualMagazineReload.supportGripDisarmedUntilRelease = false;
+        }
 
         if (!effectiveSupport)
         {
@@ -17909,6 +17942,12 @@ void VR_UpdateManualMagazineReload(
                             nowMilliseconds + 450u;
                     }
 
+                    g_vrManualMagazineReload.supportGripDisarmedUntilRelease = true;
+                    g_vrManualMagazineReload.supportGripCooldownUntilMilliseconds =
+                        nowMilliseconds + 500u;
+                    g_vrLeftControllerForegripPressed = false;
+                    g_vrTwoHandWeaponTargetActive = false;
+
                     g_vrManualMagazineReload.loadedMagazineStillInWeapon =
                         false;
 
@@ -18048,6 +18087,11 @@ void VR_UpdateManualMagazineReload(
                 g_vrManualMagazineReload.heldPoseValid = false;
                 g_vrManualMagazineReload.commitUntilMilliseconds =
                     nowMilliseconds + 450u;
+                g_vrManualMagazineReload.supportGripDisarmedUntilRelease = true;
+                g_vrManualMagazineReload.supportGripCooldownUntilMilliseconds =
+                    nowMilliseconds + 500u;
+                g_vrLeftControllerForegripPressed = false;
+                g_vrTwoHandWeaponTargetActive = false;
                 g_vrManualMagazineReload.boltRackSoundPending = true;
                 VR_ApplyRightControllerWeaponHaptic(0.32f, 0.040f);
                 Com_Printf(
@@ -18114,6 +18158,11 @@ void VR_UpdateManualMagazineReload(
                 g_vrManualMagazineReload.heldPoseValid = false;
                 g_vrManualMagazineReload.commitUntilMilliseconds =
                     nowMilliseconds + 450u;
+                g_vrManualMagazineReload.supportGripDisarmedUntilRelease = true;
+                g_vrManualMagazineReload.supportGripCooldownUntilMilliseconds =
+                    nowMilliseconds + 500u;
+                g_vrLeftControllerForegripPressed = false;
+                g_vrTwoHandWeaponTargetActive = false;
                 g_vrManualMagazineReload.boltRackSoundPending = true;
                 VR_ApplyOffhandControllerHaptic(0.45f, 0.045f);
                 VR_ApplyRightControllerWeaponHaptic(0.35f, 0.040f);

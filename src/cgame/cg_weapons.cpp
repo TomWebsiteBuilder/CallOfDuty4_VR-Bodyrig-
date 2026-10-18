@@ -7027,7 +7027,8 @@ static bool VR_AddFloatingLeftHandToScene(
     const float lightingOrigin[3],
     const bool drawHeldMagazine,
     const float heldMagazineOrigin[3],
-    const float heldMagazineAxis[3][3])
+    const float heldMagazineAxis[3][3],
+    const float magazineWellOrigin[3] = nullptr)
 {
     if (!VR_TrackedHandsEnabled() ||
         playerState == nullptr ||
@@ -7372,18 +7373,44 @@ static bool VR_AddFloatingLeftHandToScene(
                     controllerToSupport[2]);
     }
 
+    float controllerToMagWellDistance = 999.0f;
+    if (magazineWellOrigin != nullptr)
+    {
+        const float dx = supportGripControllerOrigin[0] - magazineWellOrigin[0];
+        const float dy = supportGripControllerOrigin[1] - magazineWellOrigin[1];
+        const float dz = supportGripControllerOrigin[2] - magazineWellOrigin[2];
+        controllerToMagWellDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    // Refined Support Grip Exclusion Zone:
+    // If the off-hand controller is closer to the magazine well than the foregrip,
+    // or within 6.5 inches of the magazine well and not directly on the foregrip,
+    // the operator is working near the receiver/magwell and must NOT latch onto the foregrip.
+    const bool nearMagazineWell =
+        magazineWellOrigin != nullptr &&
+        (controllerToMagWellDistance < controllerToSupportDistance ||
+         (controllerToMagWellDistance <= 6.5f && controllerToSupportDistance > 4.0f));
+
     const bool previousSupportGripLatched =
         asset->supportGripLatched;
 
     const bool automaticProximity =
         VR_SupportGripUsesAutomaticProximity();
 
+    // Cap initial attachment reach to 8.5 inches so grabbing doesn't bridge the receiver,
+    // while allowing the configured radius + hysteresis for maintaining an active hold.
+    const float configuredRadius =
+        s_vrLeftHandGripRadius != nullptr ? s_vrLeftHandGripRadius->current.value : 14.0f;
+    const float effectiveAttachRadius =
+        previousSupportGripLatched ? configuredRadius : (std::min)(configuredRadius, 8.5f);
+
     const bool insideGripRadius =
+        !nearMagazineWell &&
         supportWristAvailable &&
         s_vrLeftHandGripRadius != nullptr &&
         VrInteractions::SupportGripProximityQualifies(
             controllerToSupportDistance,
-            s_vrLeftHandGripRadius->current.value,
+            effectiveAttachRadius,
             automaticProximity &&
                 previousSupportGripLatched);
 
@@ -7393,10 +7420,11 @@ static bool VR_AddFloatingLeftHandToScene(
     // edge, so it must re-evaluate distance every frame. Its larger exit
     // radius prevents attach/detach chatter at the configured boundary.
     const bool gripDistanceAllowsAttachment =
-        automaticProximity
+        !nearMagazineWell &&
+        (automaticProximity
             ? insideGripRadius
             : (previousSupportGripLatched ||
-               insideGripRadius);
+               insideGripRadius));
 
     asset->supportGripLatched =
         !asset->magazineGripLatched &&
@@ -11460,7 +11488,8 @@ void __cdecl CG_AddPlayerWeapon(
                         floatingHandLightingOrigin,
                         leftHandGrippingHeldObject,
                         leftHandHeldOrigin,
-                        leftHandHeldAxis);
+                        leftHandHeldAxis,
+                        foundMagazineWell ? magazineWellOrigin : nullptr);
 
                 const bool airSupportDeviceRendered =
                     VR_AddAirSupportDeviceToScene(
