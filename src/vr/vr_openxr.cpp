@@ -18970,7 +18970,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
         g_vrPhysicalBodyRig.rightGripWasHeld = rightGripHeld;
 
         constexpr float kHolsterRadiusInches = 8.5f;
-        constexpr float kKnifeSheathRadiusInches = 5.5f;
+        constexpr float kKnifeSheathRadiusInches = 7.0f;
 
         // Grip Conflict Resolution: Strict Proximity & Context-Filtered Prioritization
         // When hands reach to grip objects, strictly compare distances to all available anchors:
@@ -19138,6 +19138,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
                 g_vrPhysicalBodyRig.knifeInWeaponHand = true;
                 g_vrPhysicalBodyRig.knifeToggleLatched = false;
                 g_vrPhysicalBodyRig.knifeDrawnAtMilliseconds = nowMilliseconds;
+                g_vrPhysicalBodyRig.weaponHolstered = true;
                 drawStowRightHaptic = true;
                 Com_Printf(
                     0,
@@ -19240,7 +19241,8 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
                 g_vrPhysicalBodyRig.pendingWeaponSwitch = true;
                 g_vrPhysicalBodyRig.pendingWeaponSwitchSlot = targetSlot;
                 g_vrPhysicalBodyRig.lastWeaponSwitchMilliseconds = nowMilliseconds;
-                if (g_vrPhysicalBodyRig.knifeDrawn)
+                if (g_vrPhysicalBodyRig.knifeDrawn &&
+                    g_vrPhysicalBodyRig.knifeInWeaponHand == isRightHand)
                 {
                     g_vrPhysicalBodyRig.knifeDrawn = false;
                     g_vrPhysicalBodyRig.knifeToggleLatched = false;
@@ -19284,7 +19286,8 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
                     g_vrPhysicalBodyRig.pendingWeaponSwitch = true;
                     g_vrPhysicalBodyRig.pendingWeaponSwitchSlot = targetSlot;
                     g_vrPhysicalBodyRig.lastWeaponSwitchMilliseconds = nowMilliseconds;
-                    if (g_vrPhysicalBodyRig.knifeDrawn)
+                    if (g_vrPhysicalBodyRig.knifeDrawn &&
+                        g_vrPhysicalBodyRig.knifeInWeaponHand == isRightHand)
                     {
                         g_vrPhysicalBodyRig.knifeDrawn = false;
                         g_vrPhysicalBodyRig.knifeToggleLatched = false;
@@ -19306,7 +19309,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
         }
         else if (g_vrHoldToGripEnabled &&
                  !g_vrPhysicalBodyRig.weaponHolstered &&
-                 !g_vrPhysicalBodyRig.knifeDrawn &&
+                 !(g_vrPhysicalBodyRig.knifeDrawn && g_vrPhysicalBodyRig.knifeInWeaponHand) &&
                  !weaponHandHasGrenade &&
                  !g_vrRightControllerAttackPressed &&
                  switchCooldownElapsed)
@@ -19464,8 +19467,10 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
             }
         }
 
-        // 4. Physical Gun Bashing & Muzzle Strikes (when knife is not drawn)
-        if (!g_vrPhysicalBodyRig.knifeDrawn && g_vrRightControllerWeaponPoseValid)
+        // 4. Physical Gun Bashing & Muzzle Strikes (when knife is not drawn in weapon hand and gun is held)
+        if (!(g_vrPhysicalBodyRig.knifeDrawn && g_vrPhysicalBodyRig.knifeInWeaponHand) &&
+            !g_vrPhysicalBodyRig.weaponHolstered &&
+            g_vrRightControllerWeaponPoseValid)
         {
             const float* handVelocity = rightVelocityWorld;
             const float speed = std::sqrt(
@@ -19614,6 +19619,13 @@ bool VR_IsPhysicalKnifeHeld()
     std::lock_guard<std::mutex> lock(
         g_vrWeaponControllerPoseMutex);
     return g_vrPhysicalBodyRig.knifeDrawn;
+}
+
+bool VR_IsPhysicalKnifeHeldInWeaponHand()
+{
+    std::lock_guard<std::mutex> lock(
+        g_vrWeaponControllerPoseMutex);
+    return g_vrPhysicalBodyRig.knifeDrawn && g_vrPhysicalBodyRig.knifeInWeaponHand;
 }
 
 bool VR_IsManualGrenadeHeldInWeaponHand()
@@ -20367,12 +20379,22 @@ bool VR_UpdateManualGrenadeInput(
                     distance <= VrGrenades::DistanceSquared(hand, pouchOrigin))
                     pouch = VrGrenades::Pouch::None;
             };
-            reserveCloserAnchor(leftPouch, currentOrigin, knifeSheathOrigin, 5.5f);
-            reserveCloserAnchor(leftPouch, currentOrigin, hipHolsterOrigin, 8.5f);
-            reserveCloserAnchor(leftPouch, currentOrigin, chestSlingOrigin, 8.5f);
-            reserveCloserAnchor(rightPouch, rightWorld, knifeSheathOrigin, 5.5f);
-            reserveCloserAnchor(rightPouch, rightWorld, hipHolsterOrigin, 8.5f);
-            reserveCloserAnchor(rightPouch, rightWorld, chestSlingOrigin, 8.5f);
+            const float rightHandForward =
+                (rightWorld[0] - cameraOrigin[0]) * bodyAxis[0][0] +
+                (rightWorld[1] - cameraOrigin[1]) * bodyAxis[0][1];
+            const float leftHandForward =
+                (currentOrigin[0] - cameraOrigin[0]) * bodyAxis[0][0] +
+                (currentOrigin[1] - cameraOrigin[1]) * bodyAxis[0][1];
+
+            reserveCloserAnchor(leftPouch, currentOrigin, knifeSheathOrigin, 7.0f);
+            reserveCloserAnchor(leftPouch, currentOrigin, hipHolsterOrigin, 6.5f);
+            if (leftHandForward < -1.0f)
+                reserveCloserAnchor(leftPouch, currentOrigin, chestSlingOrigin, 6.5f);
+
+            reserveCloserAnchor(rightPouch, rightWorld, knifeSheathOrigin, 7.0f);
+            reserveCloserAnchor(rightPouch, rightWorld, hipHolsterOrigin, 6.5f);
+            if (rightHandForward < -1.0f)
+                reserveCloserAnchor(rightPouch, rightWorld, chestSlingOrigin, 6.5f);
 
             const bool magazineOwnsLeftGrip =
                 VR_ManualMagazineOwnsOrClaimsLeftGripLocked(
@@ -20501,6 +20523,7 @@ bool VR_UpdateManualGrenadeInput(
 
                         if (grabByRightHand)
                         {
+                            g_vrPhysicalBodyRig.weaponHolstered = true;
                             for (int c = 0; c < 3; ++c)
                             {
                                 g_vrManualGrenade.heldOrigin[c] =
@@ -22256,7 +22279,8 @@ bool VR_GetRightControllerWeaponCollisionSegmentWorld(
     std::lock_guard<std::mutex> lock(
         g_vrWeaponControllerPoseMutex);
 
-    if (g_vrPhysicalBodyRig.knifeDrawn || g_vrPhysicalBodyRig.weaponHolstered)
+    if ((g_vrPhysicalBodyRig.knifeDrawn && g_vrPhysicalBodyRig.knifeInWeaponHand) ||
+        g_vrPhysicalBodyRig.weaponHolstered)
     {
         return false;
     }
@@ -22583,9 +22607,7 @@ bool VR_GetLocomotionCombatButtons(
                 nowMilliseconds) > 0;
     }
 
-    // Legacy melee buttons are completely unbound; melee damage and strike state
-    // are executed exclusively via 6DoF physical combat knife slashes and stabs.
-    *meleeHeld = physicalKnifeStrikeHeld;
+    *meleeHeld = physicalKnifeStrikeHeld || physicalMeleeHeld;
 
     return true;
 }

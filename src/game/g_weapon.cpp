@@ -1750,7 +1750,7 @@ void VR_CheckGunBashPhysicalCollision(gentity_s *playerEnt)
         return;
     }
 
-    if (!VR_IsInitialized() || VR_IsPhysicalKnifeHeld() || VR_IsPhysicalWeaponHolstered())
+    if (!VR_IsInitialized() || VR_IsPhysicalKnifeHeldInWeaponHand() || VR_IsPhysicalWeaponHolstered())
     {
         return;
     }

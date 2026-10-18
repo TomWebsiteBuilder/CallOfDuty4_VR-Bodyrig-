@@ -594,6 +594,9 @@ bool VR_ConsumePhysicalHolsterWeaponSwitch(int* targetSlot = nullptr);
 // either hand. Suppresses COD4's flat-screen canned viewmodel lunge animation.
 bool VR_IsPhysicalKnifeHeld();
 
+// True while the physical combat knife is drawn into the primary weapon hand.
+bool VR_IsPhysicalKnifeHeldInWeaponHand();
+
 // Returns world-space transforms for the body rig's holsters (hip sidearm,
 // chest primary sling, chest knife sheath, hip mag pouch, belt grenade) plus
 // the drawn physical combat knife pose when held in either hand.
