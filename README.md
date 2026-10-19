@@ -13,6 +13,8 @@ interaction works correctly in a headset.
 
 ## What this fork changes
 
+- A custom 3D main menu and 3D theater presentation for cutscenes.
+- A semi-3D pause menu for use in VR.
 - Physical body equipment: magazine holders, grenades, knife and weapon holsters.
 - Tracked arms and gloves with procedural sleeve IK and mission-specific materials.
 - Manual magazine reloads, weapon racking, grenade handling and two-hand interactions.
