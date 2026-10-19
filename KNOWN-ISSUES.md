@@ -1,4 +1,17 @@
-# Known issues
+# Known issues — experimental BodyRig fork
+
+Current unresolved reports: frame drops, strange gripping/attachment behaviour,
+and texture/material corruption ("textures freaking out"). Scope, input and
+rendering changes have been attempted, but these categories remain open.
+The October 19 torso visibility/pouch placement update passed the local build
+and existing automated suites; visual fit and interactions still need headset
+verification. A full campaign and long-session pass is not claimed.
+
+Headset testing across weapons, missions and runtimes is still required.
+The following is retained upstream history, not a validation statement for
+this fork.
+
+## Inherited upstream issue record
 
 This list applies to `v0.10.0-beta.19`.
 
