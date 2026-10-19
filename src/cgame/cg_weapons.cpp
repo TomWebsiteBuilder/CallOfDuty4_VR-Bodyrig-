@@ -636,6 +636,10 @@ static constexpr int
     kVrBodyRigAssetCapacity = 8;
 static constexpr uint16_t
     kVrBodyRigSegmentCount = 14u;
+// Segments 0-5 are torso, belt and collar/webbing; 6-13 are the sleeves.
+// Keep the vertex layout for IK, but submit only the arm triangles.
+static constexpr uint16_t
+    kVrBodyRigFirstArmSegment = 6u;
 static constexpr uint16_t
     kVrBodyRigRingSides = 16u;
 static constexpr uint16_t
@@ -643,7 +647,7 @@ static constexpr uint16_t
         kVrBodyRigSegmentCount * kVrBodyRigRingSides * 2u;
 static constexpr uint16_t
     kVrBodyRigTotalTriangles =
-        kVrBodyRigSegmentCount * kVrBodyRigRingSides * 2u;
+        (kVrBodyRigSegmentCount - kVrBodyRigFirstArmSegment) * kVrBodyRigRingSides * 2u;
 
 struct VrBodyRigTorsoAndArmsAsset
 {
@@ -8980,7 +8984,7 @@ VR_GetOrCreateBodyRigTorsoAndArmsAsset(
         asset.templateVertex.binormalSign = 1.0f;
 
         uint32_t writeIdx = 0u;
-        for (uint16_t seg = 0u; seg < kVrBodyRigSegmentCount; ++seg)
+        for (uint16_t seg = kVrBodyRigFirstArmSegment; seg < kVrBodyRigSegmentCount; ++seg)
         {
             const uint16_t baseVert =
                 seg * kVrBodyRigRingSides * 2u;
@@ -9498,7 +9502,7 @@ static void VR_AddPhysicalBodyRigToScene(
         10.2f,
         rightElbowWorld);
 
-    // 1. Render the 3D Tactical Torso Vest + 2-Bone IK Left & Right Arms.
+    // 1. Render the left and right IK sleeves; torso geometry has no submitted triangles.
     const VrPlayerFaction currentFaction = VR_GetMissionPlayerFaction(sourceHandModel);
     XModel* factionModel = VR_ResolveFactionCharacterModel(currentFaction);
     XModel* factionHandModel = VR_ResolveFactionViewhandsModel(currentFaction);
@@ -10001,7 +10005,7 @@ static void VR_AddPhysicalBodyRigToScene(
             {
                 Com_Printf(
                     0,
-                    "[VR][BODYRIG] Submitted procedural %s body rig (material donor %s) with dual 2-bone IK arms (%u vertices, %u triangles).\n",
+                    "[VR][BODYRIG] Submitted procedural %s arms (hidden torso, material donor %s) with dual 2-bone IK arms (%u vertices, %u triangles).\n",
                     factionName,
                     donorModel->name != nullptr ? donorModel->name : "default",
                     kVrBodyRigTotalVertices,

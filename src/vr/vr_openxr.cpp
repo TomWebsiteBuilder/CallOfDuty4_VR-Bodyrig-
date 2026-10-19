@@ -979,6 +979,12 @@ const char* VR_DisplayLengthUnit(
     return units == VrMeasurementUnitSystem::Metric ? "cm" : "in";
 }
 
+// Head-relative pouch placement in inches. Shared by rendered anchors and
+// magazine proximity checks so moving the equipment also moves its grab point.
+static constexpr float kVrPrimaryPouchForward = 0.5f;
+static constexpr float kVrSecondaryPouchForward = 3.0f;
+static constexpr float kVrMagazineHipScale = 0.75f;
+
 struct VrConfiguratorSettings
 {
     VrMeasurementUnitSystem measurementUnits =
@@ -17584,7 +17590,7 @@ void VR_UpdateManualMagazineReload(
             VrInteractions::MagazineHipCenter(
                 configurable.dominantHand,
                 configurable.magazineHip,
-                configurable.beltHipDistance);
+                configurable.beltHipDistance) * kVrMagazineHipScale;
         const float magazineHipMinimum =
             magazineHipCenter - configurable.beltGrabRadius;
         const float magazineHipMaximum =
@@ -17631,12 +17637,12 @@ void VR_UpdateManualMagazineReload(
         float distToSecondaryPouchSq = 99999.0f;
         if (g_vrLeftControllerForegripPoseValid)
         {
-            const float dx1 = g_vrLeftControllerForegripPosition[0] - (4.2f + configurable.beltForwardOffset);
+            const float dx1 = g_vrLeftControllerForegripPosition[0] - (kVrPrimaryPouchForward + configurable.beltForwardOffset);
             const float dy1 = g_vrLeftControllerForegripPosition[1] - magazineHipCenter;
             const float dz1 = g_vrLeftControllerForegripPosition[2] - (configurable.beltHeight + 1.5f);
             distToPrimaryPouchSq = dx1 * dx1 + dy1 * dy1 + dz1 * dz1;
 
-            const float dx2 = g_vrLeftControllerForegripPosition[0] - (6.0f + configurable.beltForwardOffset);
+            const float dx2 = g_vrLeftControllerForegripPosition[0] - (kVrSecondaryPouchForward + configurable.beltForwardOffset);
             const float dy2 = g_vrLeftControllerForegripPosition[1] - secMagHipCenter;
             const float dz2 = g_vrLeftControllerForegripPosition[2] - (configurable.beltHeight + 1.5f);
             distToSecondaryPouchSq = dx2 * dx2 + dy2 * dy2 + dz2 * dz2;
@@ -18786,7 +18792,7 @@ static void VR_ComputeBodyRigAnchorsWorld(
     }
 
     const float sheathForward =
-        7.5f + configurable.beltForwardOffset * 0.35f;
+        4.5f + configurable.beltForwardOffset * 0.35f;
     const float sheathLeft =
         -weaponSideSign * 5.0f;
     const float sheathUp =
@@ -18807,12 +18813,12 @@ static void VR_ComputeBodyRigAnchorsWorld(
         VrInteractions::MagazineHipCenter(
             configurable.dominantHand,
             configurable.magazineHip,
-            configurable.beltHipDistance);
+            configurable.beltHipDistance) * kVrMagazineHipScale;
     for (int i = 0; i < 3; ++i)
     {
         magPouchOrigin[i] =
             cameraOrigin[i] +
-            levelForward[i] * (4.2f + configurable.beltForwardOffset) +
+            levelForward[i] * (kVrPrimaryPouchForward + configurable.beltForwardOffset) +
             levelLeft[i] * magazineHipCenter +
             levelUp[i] * (configurable.beltHeight + 1.5f);
         magPouchAxis[0][i] = levelForward[i];
@@ -18822,7 +18828,7 @@ static void VR_ComputeBodyRigAnchorsWorld(
         // Frag grenade pouch positioned on dominant front waist for clear spatial separation from magazine pouches
         grenadePouchOrigin[i] =
             cameraOrigin[i] +
-            levelForward[i] * (6.2f + configurable.beltForwardOffset) +
+            levelForward[i] * (3.2f + configurable.beltForwardOffset) +
             levelLeft[i] * (weaponSideSign * configurable.beltHipDistance * 0.45f) +
             levelUp[i] * (configurable.beltHeight + 1.8f);
         grenadePouchAxis[0][i] = levelForward[i];
@@ -18834,7 +18840,7 @@ static void VR_ComputeBodyRigAnchorsWorld(
     if (tacticalPouchOrigin != nullptr && tacticalPouchAxis != nullptr)
     {
         const float tacticalForward =
-            7.2f + configurable.beltForwardOffset * 0.4f;
+            4.2f + configurable.beltForwardOffset * 0.4f;
         const float tacticalLeft =
             weaponSideSign * 4.8f;
         const float tacticalUp =
@@ -18858,7 +18864,7 @@ static void VR_ComputeBodyRigAnchorsWorld(
         {
             secMagPouchOrigin[i] =
                 cameraOrigin[i] +
-                levelForward[i] * (6.0f + configurable.beltForwardOffset) +
+                levelForward[i] * (kVrSecondaryPouchForward + configurable.beltForwardOffset) +
                 levelLeft[i] * (magazineHipCenter * 0.88f) +
                 levelUp[i] * (configurable.beltHeight + 1.5f);
             secMagPouchAxis[0][i] = levelForward[i];
