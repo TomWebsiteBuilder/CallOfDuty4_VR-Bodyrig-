@@ -616,6 +616,8 @@ static VrBodyHolsterPropRenderObject
 static VrBodyHolsterPropRenderObject
     s_vrHolsteredSpareMagObject = {};
 static VrBodyHolsterPropRenderObject
+    s_vrHolsteredSecMagObject = {};
+static VrBodyHolsterPropRenderObject
     s_vrHolsteredGrenadeObject = {};
 static VrBodyHolsterPropRenderObject
     s_vrHolsteredTacticalObject = {};
@@ -7773,6 +7775,9 @@ static void VR_FreeManualReloadClipRenderObjects()
         &s_vrHolsteredKnifeObject);
     VR_FreeBodyHolsterPropRenderObject(
         &s_vrHolsteredSpareMagObject);
+    // Release the secondary magazine before map teardown resets DObj strings.
+    VR_FreeBodyHolsterPropRenderObject(
+        &s_vrHolsteredSecMagObject);
     VR_FreeBodyHolsterPropRenderObject(
         &s_vrHolsteredGrenadeObject);
     VR_FreeBodyHolsterPropRenderObject(
@@ -9770,7 +9775,6 @@ static void VR_AddPhysicalBodyRigToScene(
     }
 
     // 4b. Render Secondary Magazine in the Dedicated Secondary Magazine Holder.
-    static VrBodyHolsterPropRenderObject s_vrHolsteredSecMagObject;
     uint32_t secondaryWeaponNum = 0u;
     const WeaponDef* secondaryDef = nullptr;
     XModel* secondaryClipModel = nullptr;

@@ -124,7 +124,7 @@ void __cdecl PM_StepSlideMove(pmove_t *pm, pml_t *pml, int32_t gravity)
             down[2] = ps->origin[2];
             down[2] = down[2] - fStepAmount;
             if (bHadGround)
-                down[2] = down[2] - 9.0;
+                down[2] = down[2] - fStepSize;
             PM_playerTrace(pm, &trace, ps->origin, pm->mins, pm->maxs, down, ps->clientNum, pm->tracemask);
             if (Trace_GetEntityHitId(&trace) < MAX_CLIENTS)
             {
@@ -164,10 +164,16 @@ void __cdecl PM_StepSlideMove(pmove_t *pm, pml_t *pml, int32_t gravity)
                 down[0] = ps->origin[0];
                 down[1] = ps->origin[1];
                 down[2] = ps->origin[2];
-                down[2] = down[2] - 9.0;
+                down[2] = down[2] - fStepSize;
                 PM_playerTrace(pm, &trace, ps->origin, pm->mins, pm->maxs, down, ps->clientNum, pm->tracemask);
                 if (trace.fraction < 1.0)
                 {
+                    if (!trace.walkable && trace.normal[2] < 0.300000011920929)
+                    {
+                        Vec3Copy(down_o, ps->origin);
+                        Vec3Copy(down_v, ps->velocity);
+                        return;
+                    }
                     Vec3Lerp(ps->origin, down, trace.fraction, endpos);
                     fStepAmount = endpos[2] - ps->origin[2];
                     Vec3Copy(endpos, ps->origin);

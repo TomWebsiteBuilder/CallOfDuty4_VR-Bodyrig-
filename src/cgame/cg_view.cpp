@@ -1728,11 +1728,35 @@ void __cdecl CG_CalcViewValues(int localClientNum)
             VR_GetFirstGameplayRecenterModeName());
     }
 
+    float baseHeadOrigin[3];
+    Vec3Copy(cgameGlob->refdef.vieworg, baseHeadOrigin);
+
     const bool vrHeadPositionApplied =
         VR_ApplyHeadPosition(
             cgameGlob->refdef.vieworg,
             cgameGlob->refdef.viewaxis,
             cgameGlob->predictedPlayerState.viewHeightCurrent);
+
+    if (vrHeadPositionApplied && cgameGlob->predictedPlayerState.pm_type < PM_DEAD)
+    {
+        const float headRadius = 4.0f;
+        const float headMins[3] = {-headRadius, -headRadius, -headRadius};
+        const float headMaxs[3] = {headRadius, headRadius, headRadius};
+        trace_t headTrace;
+        CG_TraceCapsule(
+            &headTrace,
+            baseHeadOrigin,
+            headMins,
+            headMaxs,
+            cgameGlob->refdef.vieworg,
+            cgameGlob->predictedPlayerState.clientNum,
+            42057745);
+
+        if (!headTrace.startsolid && headTrace.fraction < 1.0f)
+        {
+            Vec3Lerp(baseHeadOrigin, cgameGlob->refdef.vieworg, headTrace.fraction, cgameGlob->refdef.vieworg);
+        }
+    }
 
     const bool vrHeadOrientationApplied =
         VR_ApplyHeadOrientation(
