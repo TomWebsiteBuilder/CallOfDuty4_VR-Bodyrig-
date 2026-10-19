@@ -132,3 +132,21 @@ bool VR_D3D9IsSameFrameStereoEnabled()
 void VR_D3D9CaptureFrame(IDirect3DDevice9*, std::uint64_t)
 {
 }
+
+void VR_UpdatePhysicalBodyHolstersAndKnife(
+    const float[3],
+    const float[3][3],
+    int,
+    int)
+{
+}
+
+void VR_ResolveCarriedWeaponSlots(
+    const unsigned int[4],
+    unsigned int,
+    int* outSlot1Weapon,
+    int* outSlot2Weapon)
+{
+    if (outSlot1Weapon) *outSlot1Weapon = 0;
+    if (outSlot2Weapon) *outSlot2Weapon = 0;
+}

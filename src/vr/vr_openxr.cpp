@@ -2534,6 +2534,9 @@ struct VrManualMagazineReloadState
     };
     float slideTravelInches = 2.0f;
     bool boltRackSoundPending = false;
+    bool boltPullSoundPending = false;
+    bool boltPullSoundTriggered = false;
+    bool rackStartedFromNeedsBoltRack = false;
 };
 
 VrManualMagazineReloadState
@@ -4539,13 +4542,9 @@ float4 PSScope(PixelInput input) : SV_TARGET
             capturedSampler,
             sourceUv - float2(0.0f, sourceTexel.y)).rgb;
 
-    float3 sharpenedScope =
-        magnifiedCenter.rgb * 1.72f -
-        magnifiedNeighbors * 0.18f;
-
-    sharpenedScope = saturate(
-        (sharpenedScope - 0.5f) * 1.06f +
-        0.5f);
+    float3 sharpenedScope = saturate(
+        magnifiedCenter.rgb * 1.25f -
+        magnifiedNeighbors * 0.0625f);
 
     const float4 magnifiedColor =
         float4(
@@ -4892,7 +4891,7 @@ float4 PSScope(PixelInput input) : SV_TARGET
 
     constexpr float defaultBrightness = 1.0f;
     constexpr float minimumBrightness = 0.20f;
-    constexpr float maximumBrightness = 1.0f;
+    constexpr float maximumBrightness = 2.50f;
 
     g_vrCompositorBrightness = defaultBrightness;
 
@@ -5501,8 +5500,14 @@ void VR_UpdateCompositorConstantsForEye(
     }
 
     VrCompositorConstants constants = {};
+    float compositorBrightness = g_vrCompositorBrightness;
+    const dvar_t* gammaDvar = Dvar_FindVar("r_gamma");
+    if (gammaDvar != nullptr && gammaDvar->current.value > 0.001f)
+    {
+        compositorBrightness *= (gammaDvar->current.value / 0.8f);
+    }
     constants.settings[0] =
-        g_vrCompositorBrightness;
+        (std::min)((std::max)(0.20f, compositorBrightness), 2.50f);
     constants.settings[1] =
         mainStereoFraction;
 
@@ -17600,7 +17605,7 @@ void VR_UpdateManualMagazineReload(
             g_vrLeftControllerForegripPosition[2] >=
                 beltMinimumUp;
 
-        const float secMagHipCenter = magazineHipCenter * 0.58f;
+        const float secMagHipCenter = magazineHipCenter * 0.88f;
         const float secMagHipMinimum =
             secMagHipCenter - configurable.beltGrabRadius;
         const float secMagHipMaximum =
@@ -17613,9 +17618,9 @@ void VR_UpdateManualMagazineReload(
             g_vrLeftControllerForegripPosition[0] <=
                 26.0f + configurable.beltForwardOffset &&
             g_vrLeftControllerForegripPosition[1] >=
-                secMagHipMinimum &&
+                (std::min)(secMagHipMinimum, secMagHipMaximum) &&
             g_vrLeftControllerForegripPosition[1] <=
-                secMagHipMaximum &&
+                (std::max)(secMagHipMinimum, secMagHipMaximum) &&
             g_vrLeftControllerForegripPosition[2] <=
                 beltMaximumUp &&
             g_vrLeftControllerForegripPosition[2] >=
@@ -17626,14 +17631,14 @@ void VR_UpdateManualMagazineReload(
         float distToSecondaryPouchSq = 99999.0f;
         if (g_vrLeftControllerForegripPoseValid)
         {
-            const float dx1 = g_vrLeftControllerForegripPosition[0] - (3.0f + configurable.beltForwardOffset);
+            const float dx1 = g_vrLeftControllerForegripPosition[0] - (4.2f + configurable.beltForwardOffset);
             const float dy1 = g_vrLeftControllerForegripPosition[1] - magazineHipCenter;
-            const float dz1 = g_vrLeftControllerForegripPosition[2] - configurable.beltHeight;
+            const float dz1 = g_vrLeftControllerForegripPosition[2] - (configurable.beltHeight + 1.5f);
             distToPrimaryPouchSq = dx1 * dx1 + dy1 * dy1 + dz1 * dz1;
 
-            const float dx2 = g_vrLeftControllerForegripPosition[0] - (8.0f + configurable.beltForwardOffset);
+            const float dx2 = g_vrLeftControllerForegripPosition[0] - (6.0f + configurable.beltForwardOffset);
             const float dy2 = g_vrLeftControllerForegripPosition[1] - secMagHipCenter;
-            const float dz2 = g_vrLeftControllerForegripPosition[2] - configurable.beltHeight;
+            const float dz2 = g_vrLeftControllerForegripPosition[2] - (configurable.beltHeight + 1.5f);
             distToSecondaryPouchSq = dx2 * dx2 + dy2 * dy2 + dz2 * dz2;
         }
         const float pouchRadialThresholdSq = (configurable.beltGrabRadius * 1.5f) * (configurable.beltGrabRadius * 1.5f);
@@ -17643,6 +17648,45 @@ void VR_UpdateManualMagazineReload(
 
         const bool offhandGripAtAnyMagHolder =
             offhandGripAtMagazineHip || offhandGripAtSecMagHip || offhandNearPouchSphere;
+
+        float boltAnchorWorld[3] = {};
+        float boltAxisWorld[3][3] = {};
+        if (g_vrManualMagazineReload.boltAnchorValid)
+        {
+            std::memcpy(
+                boltAnchorWorld,
+                g_vrManualMagazineReload.boltAnchorOrigin,
+                sizeof(boltAnchorWorld));
+            std::memcpy(
+                boltAxisWorld,
+                g_vrManualMagazineReload.boltAnchorAxis,
+                sizeof(boltAxisWorld));
+        }
+        else
+        {
+            for (int component = 0; component < 3; ++component)
+            {
+                boltAnchorWorld[component] =
+                    magazineWellOrigin[component] +
+                    magazineWellAxis[0][component] * 1.5f +
+                    magazineWellAxis[2][component] * 3.8f;
+            }
+            std::memcpy(
+                boltAxisWorld,
+                magazineWellAxis,
+                sizeof(boltAxisWorld));
+        }
+
+        const float boltDelta[3] = {
+            leftGripWorld[0] - boltAnchorWorld[0],
+            leftGripWorld[1] - boltAnchorWorld[1],
+            leftGripWorld[2] - boltAnchorWorld[2],
+        };
+        const float boltDistance =
+            std::sqrt(
+                boltDelta[0] * boltDelta[0] +
+                boltDelta[1] * boltDelta[1] +
+                boltDelta[2] * boltDelta[2]);
 
         const float loadedMagazineDelta[3] = {
             leftGripWorld[0] - magazineWellOrigin[0],
@@ -17655,16 +17699,70 @@ void VR_UpdateManualMagazineReload(
                 loadedMagazineDelta[1] * loadedMagazineDelta[1] +
                 loadedMagazineDelta[2] * loadedMagazineDelta[2]);
 
+        const float handUpAlongWeapon =
+            loadedMagazineDelta[0] * magazineWellAxis[2][0] +
+            loadedMagazineDelta[1] * magazineWellAxis[2][1] +
+            loadedMagazineDelta[2] * magazineWellAxis[2][2];
+
+        const float boltGrabRadius = 5.25f;
+
+        const bool offhandInSlideZone =
+            g_vrLeftControllerForegripPoseValid &&
+            ((boltDistance <= boltGrabRadius) || (handUpAlongWeapon > 1.25f));
+
+        const bool canGrabSlide =
+            !VR_IsPhysicalLadderActive() &&
+            (g_vrManualMagazineReload.stage ==
+                 VrManualMagazineReloadStage::NeedsBoltRack ||
+             g_vrManualMagazineReload.stage ==
+                 VrManualMagazineReloadStage::Ready) &&
+            squeezePressedEdge &&
+            g_vrLeftControllerForegripPoseValid &&
+            boltDistance <= boltGrabRadius;
+
+        if (canGrabSlide)
+        {
+            g_vrManualMagazineReload.rackStartedFromNeedsBoltRack =
+                (g_vrManualMagazineReload.stage ==
+                 VrManualMagazineReloadStage::NeedsBoltRack);
+            g_vrManualMagazineReload.stage =
+                VrManualMagazineReloadStage::RackingBolt;
+            g_vrManualMagazineReload.boltPullFraction = 0.0f;
+            g_vrManualMagazineReload.boltPullSoundTriggered = false;
+            std::memcpy(
+                g_vrManualMagazineReload.boltGrabStartOrigin,
+                leftGripWorld,
+                sizeof(g_vrManualMagazineReload.boltGrabStartOrigin));
+            std::memcpy(
+                g_vrManualMagazineReload.heldOrigin,
+                leftGripWorld,
+                sizeof(g_vrManualMagazineReload.heldOrigin));
+            std::memcpy(
+                g_vrManualMagazineReload.heldAxis,
+                leftGripWorldAxis,
+                sizeof(g_vrManualMagazineReload.heldAxis));
+            g_vrManualMagazineReload.heldPoseValid = true;
+            g_vrLeftControllerForegripPressed = false;
+            g_vrTwoHandWeaponTargetActive = false;
+            VR_ApplyOffhandControllerHaptic(0.22f, 0.030f);
+            Com_Printf(
+                0,
+                "[VR][RELOAD] Off hand grabbed weapon %d charging handle/bolt; "
+                "pull rearward to chamber a round.\n",
+                weaponIndex);
+        }
+
         static bool s_loadedMagClearedWell = false;
 
         // Method 1: Manually grabbing the loaded clip from the gun
         const bool canGrabLoaded =
+            !canGrabSlide && !offhandInSlideZone &&
             canReload && !VR_IsPhysicalLadderActive() &&
             g_vrManualMagazineReload.stage ==
                 VrManualMagazineReloadStage::Ready &&
             (squeezePressedEdge || (leftSqueezeHeld && !g_vrLeftControllerForegripPressed)) &&
             g_vrLeftControllerForegripPoseValid &&
-            loadedMagazineDistance <= configurable.reloadInsertRadius * 1.45f;
+            loadedMagazineDistance <= (std::min)(configurable.reloadInsertRadius, 3.8f);
 
         if (canGrabLoaded)
         {
@@ -18008,98 +18106,30 @@ void VR_UpdateManualMagazineReload(
             }
         }
 
-        float boltAnchorWorld[3] = {};
-        float boltAxisWorld[3][3] = {};
-        if (g_vrManualMagazineReload.boltAnchorValid)
+        if (!VR_IsPhysicalLadderActive() &&
+            g_vrManualMagazineReload.stage ==
+                VrManualMagazineReloadStage::NeedsBoltRack &&
+            ejectButtonPressedEdge)
         {
-            std::memcpy(
-                boltAnchorWorld,
-                g_vrManualMagazineReload.boltAnchorOrigin,
-                sizeof(boltAnchorWorld));
-            std::memcpy(
-                boltAxisWorld,
-                g_vrManualMagazineReload.boltAnchorAxis,
-                sizeof(boltAxisWorld));
-        }
-        else
-        {
-            for (int component = 0; component < 3; ++component)
-            {
-                boltAnchorWorld[component] =
-                    magazineWellOrigin[component] +
-                    magazineWellAxis[0][component] * 1.5f +
-                    magazineWellAxis[2][component] * 3.8f;
-            }
-            std::memcpy(
-                boltAxisWorld,
-                magazineWellAxis,
-                sizeof(boltAxisWorld));
-        }
-
-        const float boltDelta[3] = {
-            leftGripWorld[0] - boltAnchorWorld[0],
-            leftGripWorld[1] - boltAnchorWorld[1],
-            leftGripWorld[2] - boltAnchorWorld[2],
-        };
-        const float boltDistance =
-            std::sqrt(
-                boltDelta[0] * boltDelta[0] +
-                boltDelta[1] * boltDelta[1] +
-                boltDelta[2] * boltDelta[2]);
-
-        if (!VR_IsPhysicalLadderActive() && g_vrManualMagazineReload.stage ==
-            VrManualMagazineReloadStage::NeedsBoltRack)
-        {
-            const float boltGrabRadius =
-                (std::max)(7.5f, configurable.reloadInsertRadius + 1.5f);
-            if (squeezePressedEdge &&
-                g_vrLeftControllerForegripPoseValid &&
-                boltDistance <= boltGrabRadius)
-            {
-                g_vrManualMagazineReload.stage =
-                    VrManualMagazineReloadStage::RackingBolt;
-                g_vrManualMagazineReload.boltPullFraction = 0.0f;
-                std::memcpy(
-                    g_vrManualMagazineReload.boltGrabStartOrigin,
-                    leftGripWorld,
-                    sizeof(g_vrManualMagazineReload.boltGrabStartOrigin));
-                std::memcpy(
-                    g_vrManualMagazineReload.heldOrigin,
-                    leftGripWorld,
-                    sizeof(g_vrManualMagazineReload.heldOrigin));
-                std::memcpy(
-                    g_vrManualMagazineReload.heldAxis,
-                    leftGripWorldAxis,
-                    sizeof(g_vrManualMagazineReload.heldAxis));
-                g_vrManualMagazineReload.heldPoseValid = true;
-                VR_ApplyOffhandControllerHaptic(0.22f, 0.030f);
-                Com_Printf(
-                    0,
-                    "[VR][RELOAD] Off hand grabbed weapon %d charging handle/bolt; "
-                    "pull rearward to chamber a round.\n",
-                    weaponIndex);
-            }
-            else if (ejectButtonPressedEdge)
-            {
-                g_vrManualMagazineReload.stage =
-                    VrManualMagazineReloadStage::Ready;
-                g_vrManualMagazineReload.boltPullFraction = 0.0f;
-                g_vrManualMagazineReload.heldPoseValid = false;
-                g_vrManualMagazineReload.commitUntilMilliseconds =
-                    nowMilliseconds + 450u;
-                g_vrManualMagazineReload.supportGripDisarmedUntilRelease = true;
-                g_vrManualMagazineReload.supportGripCooldownUntilMilliseconds =
-                    nowMilliseconds + 500u;
-                g_vrLeftControllerForegripPressed = false;
-                g_vrTwoHandWeaponTargetActive = false;
-                g_vrManualMagazineReload.boltRackSoundPending = true;
-                VR_ApplyRightControllerWeaponHaptic(0.32f, 0.040f);
-                Com_Printf(
-                    0,
-                    "[VR][RELOAD] Released bolt catch on weapon %d; "
-                    "committing ammo transfer.\n",
-                    weaponIndex);
-            }
+            g_vrManualMagazineReload.stage =
+                VrManualMagazineReloadStage::Ready;
+            g_vrManualMagazineReload.boltPullFraction = 0.0f;
+            g_vrManualMagazineReload.boltPullSoundTriggered = false;
+            g_vrManualMagazineReload.heldPoseValid = false;
+            g_vrManualMagazineReload.commitUntilMilliseconds =
+                nowMilliseconds + 450u;
+            g_vrManualMagazineReload.supportGripDisarmedUntilRelease = true;
+            g_vrManualMagazineReload.supportGripCooldownUntilMilliseconds =
+                nowMilliseconds + 500u;
+            g_vrLeftControllerForegripPressed = false;
+            g_vrTwoHandWeaponTargetActive = false;
+            g_vrManualMagazineReload.boltRackSoundPending = true;
+            VR_ApplyRightControllerWeaponHaptic(0.32f, 0.040f);
+            Com_Printf(
+                0,
+                "[VR][RELOAD] Released bolt catch on weapon %d; "
+                "committing ammo transfer.\n",
+                weaponIndex);
         }
         else if (g_vrManualMagazineReload.stage ==
                  VrManualMagazineReloadStage::RackingBolt)
@@ -18122,16 +18152,21 @@ void VR_UpdateManualMagazineReload(
                         boltAxisWorld[0][2];
                 const float effectivePull =
                     (std::max)(0.0f, (std::max)(pullFromStart, pullFromAnchor));
-                const float requiredBoltPullInches =
-                    g_vrManualMagazineReload.slideTravelInches > 0.5f
-                        ? g_vrManualMagazineReload.slideTravelInches
-                        : 2.0f;
+                const float requiredBoltPullInches = 3.5f;
                 g_vrManualMagazineReload.boltPullFraction =
                     (std::max)(
                         0.0f,
                         (std::min)(
                             1.0f,
                             effectivePull / requiredBoltPullInches));
+
+                if (g_vrManualMagazineReload.boltPullFraction >= 0.15f &&
+                    !g_vrManualMagazineReload.boltPullSoundTriggered)
+                {
+                    g_vrManualMagazineReload.boltPullSoundPending = true;
+                    g_vrManualMagazineReload.boltPullSoundTriggered = true;
+                    VR_ApplyOffhandControllerHaptic(0.20f, 0.025f);
+                }
 
                 // Lock off-hand glove attachment cleanly along charging handle / slide travel line
                 for (int c = 0; c < 3; ++c)
@@ -18150,11 +18185,12 @@ void VR_UpdateManualMagazineReload(
 
             if (g_vrManualMagazineReload.boltPullFraction >= 0.85f ||
                 (squeezeReleasedEdge &&
-                 g_vrManualMagazineReload.boltPullFraction >= 0.45f))
+                 g_vrManualMagazineReload.boltPullFraction >= 0.40f))
             {
                 g_vrManualMagazineReload.stage =
                     VrManualMagazineReloadStage::Ready;
                 g_vrManualMagazineReload.boltPullFraction = 0.0f;
+                g_vrManualMagazineReload.boltPullSoundTriggered = false;
                 g_vrManualMagazineReload.heldPoseValid = false;
                 g_vrManualMagazineReload.commitUntilMilliseconds =
                     nowMilliseconds + 450u;
@@ -18174,9 +18210,16 @@ void VR_UpdateManualMagazineReload(
             }
             else if (squeezeReleasedEdge)
             {
+                if (g_vrManualMagazineReload.boltPullFraction >= 0.20f)
+                {
+                    g_vrManualMagazineReload.boltRackSoundPending = true;
+                }
                 g_vrManualMagazineReload.stage =
-                    VrManualMagazineReloadStage::NeedsBoltRack;
+                    g_vrManualMagazineReload.rackStartedFromNeedsBoltRack
+                        ? VrManualMagazineReloadStage::NeedsBoltRack
+                        : VrManualMagazineReloadStage::Ready;
                 g_vrManualMagazineReload.boltPullFraction = 0.0f;
+                g_vrManualMagazineReload.boltPullSoundTriggered = false;
                 g_vrManualMagazineReload.heldPoseValid = false;
                 Com_Printf(
                     0,
@@ -18485,6 +18528,25 @@ bool VR_ConsumeManualReloadBoltRackSoundPending(
     return pending;
 }
 
+bool VR_ConsumeManualReloadBoltPullSoundPending(
+    const int weaponIndex)
+{
+    std::lock_guard<std::mutex> lock(
+        g_vrWeaponControllerPoseMutex);
+
+    if (!g_vrManualMagazineReload.enabled ||
+        g_vrManualMagazineReload.weaponIndex !=
+            weaponIndex)
+    {
+        return false;
+    }
+
+    const bool pending =
+        g_vrManualMagazineReload.boltPullSoundPending;
+    g_vrManualMagazineReload.boltPullSoundPending = false;
+    return pending;
+}
+
 
 bool VR_GetManualReloadBoltRackState(
     const int weaponIndex,
@@ -18757,13 +18819,12 @@ static void VR_ComputeBodyRigAnchorsWorld(
         magPouchAxis[1][i] = levelLeft[i];
         magPouchAxis[2][i] = levelUp[i];
 
-        const float fragSide = VrInteractions::FragUsesLeftHip(
-            configurable.dominantHand, configurable.grenadeBeltLayout) ? 1.0f : -1.0f;
+        // Frag grenade pouch positioned on dominant front waist for clear spatial separation from magazine pouches
         grenadePouchOrigin[i] =
             cameraOrigin[i] +
             levelForward[i] * (6.2f + configurable.beltForwardOffset) +
-            levelLeft[i] * (fragSide * configurable.beltHipDistance * 0.55f) +
-            levelUp[i] * (configurable.beltHeight + 2.0f);
+            levelLeft[i] * (weaponSideSign * configurable.beltHipDistance * 0.45f) +
+            levelUp[i] * (configurable.beltHeight + 1.8f);
         grenadePouchAxis[0][i] = levelForward[i];
         grenadePouchAxis[1][i] = levelLeft[i];
         grenadePouchAxis[2][i] = levelUp[i];
@@ -18797,9 +18858,9 @@ static void VR_ComputeBodyRigAnchorsWorld(
         {
             secMagPouchOrigin[i] =
                 cameraOrigin[i] +
-                levelForward[i] * (6.5f + configurable.beltForwardOffset) +
-                levelLeft[i] * (magazineHipCenter * 0.58f) +
-                levelUp[i] * (configurable.beltHeight + 1.2f);
+                levelForward[i] * (6.0f + configurable.beltForwardOffset) +
+                levelLeft[i] * (magazineHipCenter * 0.88f) +
+                levelUp[i] * (configurable.beltHeight + 1.5f);
             secMagPouchAxis[0][i] = levelForward[i];
             secMagPouchAxis[1][i] = levelLeft[i];
             secMagPouchAxis[2][i] = levelUp[i];
@@ -18812,7 +18873,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
     const float cameraOrigin[3],
     const float cameraAxis[3][3],
     const int activeWeaponIndex,
-    const bool activeWeaponIsPistol)
+    const int activeWeaponHomeSlot)
 {
     (void)activeWeaponIndex;
     if (cameraOrigin == nullptr ||
@@ -19207,7 +19268,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
         }
 
         // 2. Physical Hip Sidearm Holster (Slot 1) & Shoulder Sling (Slot 2) Interaction
-        const int activeWeaponHomeSlot = activeWeaponIsPistol ? 1 : 2;
+        const int homeSlot = (activeWeaponHomeSlot == 1) ? 1 : 2;
         const int rightTargetSlot = rightInHip ? 1 : (rightInChest ? 2 : 0);
         const int leftTargetSlot = leftInHip ? 1 : (leftInChest ? 2 : 0);
 
@@ -19257,13 +19318,13 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
                 else
                     drawStowLeftHaptic = true;
                 Com_Printf(0, "[VR][HOLSTER] Drawn %s weapon from holster (slot %d) by %s hand.\n",
-                    targetSlot == 1 ? "hip sidearm" : "shoulder sling primary", targetSlot,
+                    targetSlot == 1 ? "hip sidearm/secondary" : "shoulder sling primary", targetSlot,
                     isRightHand ? "weapon" : "off");
             }
             else
             {
                 // Weapon is currently drawn and held in hand.
-                if (targetSlot == activeWeaponHomeSlot)
+                if (targetSlot == homeSlot)
                 {
                     // Hand is reaching into the currently held weapon's holster: STOW IT!
                     g_vrPhysicalBodyRig.weaponHolstered = true;
@@ -19276,7 +19337,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
                     else
                         drawStowLeftHaptic = true;
                     Com_Printf(0, "[VR][HOLSTER] Stowed %s weapon into %s holster.\n",
-                        targetSlot == 1 ? "hip sidearm" : "shoulder sling primary",
+                        targetSlot == 1 ? "hip sidearm/secondary" : "shoulder sling primary",
                         targetSlot == 1 ? "hip" : "shoulder");
                 }
                 else
@@ -19302,7 +19363,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
                     else
                         drawStowLeftHaptic = true;
                     Com_Printf(0, "[VR][HOLSTER] Switched to %s weapon (slot %d) by %s hand.\n",
-                        targetSlot == 1 ? "hip sidearm" : "shoulder sling primary", targetSlot,
+                        targetSlot == 1 ? "hip sidearm/secondary" : "shoulder sling primary", targetSlot,
                         isRightHand ? "weapon" : "off");
                 }
             }
@@ -19324,7 +19385,7 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
             const bool leftHolsterRelease =
                 leftGripReleasedEdge &&
                 !leftInSheath &&
-                (leftTargetSlot == activeWeaponHomeSlot);
+                (leftTargetSlot == homeSlot);
 
             if (rightWeaponRelease || leftHolsterRelease)
             {

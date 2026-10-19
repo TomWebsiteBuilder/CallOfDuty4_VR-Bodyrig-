@@ -2463,11 +2463,10 @@ static void R_ApplyVrLightingAndLevelFilter(GfxViewInfo *viewInfo)
     }
 
     // 1. Base VR Lighting Normalization:
-    // Reduce CoD4's flat-screen washed-out chalkiness by deepening black levels,
-    // restoring color saturation, and tightening shadow tint lift.
-    viewInfo->film.desaturation *= 0.62f;
-    viewInfo->film.contrast *= 1.13f;
-    viewInfo->film.brightness -= 0.026f;
+    // Balance CoD4's flat-screen color by gently restoring saturation while preserving shadow detail in VR.
+    viewInfo->film.desaturation *= 0.85f;
+    viewInfo->film.contrast *= 1.02f;
+    viewInfo->film.brightness += 0.005f;
 
     for (int c = 0; c < 3; ++c)
     {
@@ -2476,7 +2475,6 @@ static void R_ApplyVrLightingAndLevelFilter(GfxViewInfo *viewInfo)
             viewInfo->film.tintDark[c] =
                 1.18f + (viewInfo->film.tintDark[c] - 1.18f) * 0.35f;
         }
-        viewInfo->film.tintDark[c] *= 0.93f;
     }
 
     // 2. Subtle Level-to-Level Custom Post-Processing Filters:
@@ -2495,17 +2493,17 @@ static void R_ApplyVrLightingAndLevelFilter(GfxViewInfo *viewInfo)
     if (I_stricmp(mapName, "cargoship") == 0)
     {
         // Crew Expendable: stormy North Atlantic slate shadows & cold rain highlights
-        contrastMul = 1.06f;
-        brightnessOffset = -0.010f;
-        darkMul[0] = 0.91f; darkMul[1] = 0.96f; darkMul[2] = 1.06f;
-        lightMul[0] = 0.96f; lightMul[1] = 1.00f; lightMul[2] = 1.06f;
+        contrastMul = 1.02f;
+        brightnessOffset = 0.0f;
+        darkMul[0] = 0.96f; darkMul[1] = 0.98f; darkMul[2] = 1.03f;
+        lightMul[0] = 0.98f; lightMul[1] = 1.00f; lightMul[2] = 1.03f;
     }
     else if (I_stricmp(mapName, "killhouse") == 0)
     {
         // F.N.G.: clean Credenhill overcast with crisp shadow separation
-        contrastMul = 1.04f;
-        brightnessOffset = -0.008f;
-        desatMul = 0.88f;
+        contrastMul = 1.02f;
+        brightnessOffset = 0.0f;
+        desatMul = 0.92f;
     }
     else if (I_stricmp(mapName, "coup") == 0 ||
              I_stricmp(mapName, "armada") == 0 ||
@@ -2513,48 +2511,48 @@ static void R_ApplyVrLightingAndLevelFilter(GfxViewInfo *viewInfo)
              I_stricmp(mapName, "ambush") == 0)
     {
         // Daytime Middle East / Sins of the Father: tame sand glare, rich golden-ochre mood
-        contrastMul = 1.07f;
-        brightnessOffset = -0.016f;
-        darkMul[0] = 0.96f; darkMul[1] = 0.93f; darkMul[2] = 0.88f;
-        lightMul[0] = 1.05f; lightMul[1] = 1.01f; lightMul[2] = 0.93f;
+        contrastMul = 1.03f;
+        brightnessOffset = 0.0f;
+        darkMul[0] = 0.98f; darkMul[1] = 0.96f; darkMul[2] = 0.92f;
+        lightMul[0] = 1.03f; lightMul[1] = 1.01f; lightMul[2] = 0.96f;
     }
     else if (I_stricmp(mapName, "blackout") == 0 ||
              I_stricmp(mapName, "bog_a") == 0 ||
              I_stricmp(mapName, "hunted") == 0 ||
              I_stricmp(mapName, "ac130") == 0)
     {
-        // Night operations: deep nocturnal blacks with subtle moonlit cyan-blue shadows
-        contrastMul = 1.08f;
-        brightnessOffset = -0.018f;
-        darkMul[0] = 0.88f; darkMul[1] = 0.95f; darkMul[2] = 1.06f;
-        lightMul[0] = 0.97f; lightMul[1] = 1.01f; lightMul[2] = 1.05f;
+        // Night operations: clear night visibility without crushed shadow detail
+        contrastMul = 1.02f;
+        brightnessOffset = 0.0f;
+        darkMul[0] = 0.95f; darkMul[1] = 0.98f; darkMul[2] = 1.03f;
+        lightMul[0] = 0.98f; lightMul[1] = 1.01f; lightMul[2] = 1.03f;
     }
     else if (I_stricmp(mapName, "aftermath") == 0)
     {
         // Aftermath: high-contrast nuclear ash and smoldering amber horizon
-        contrastMul = 1.09f;
-        brightnessOffset = -0.015f;
-        darkMul[0] = 1.04f; darkMul[1] = 0.92f; darkMul[2] = 0.86f;
-        lightMul[0] = 1.06f; lightMul[1] = 0.97f; lightMul[2] = 0.90f;
+        contrastMul = 1.04f;
+        brightnessOffset = 0.0f;
+        darkMul[0] = 1.02f; darkMul[1] = 0.96f; darkMul[2] = 0.92f;
+        lightMul[0] = 1.03f; lightMul[1] = 0.98f; lightMul[2] = 0.94f;
     }
     else if (I_stricmp(mapName, "village_assault") == 0 ||
              I_stricmp(mapName, "village_defend") == 0)
     {
-        // Safehouse & Heat: crisp Caucasus highland contrast with deep forest shadows
-        contrastMul = 1.06f;
-        brightnessOffset = -0.012f;
-        darkMul[0] = 0.93f; darkMul[1] = 0.97f; darkMul[2] = 0.94f;
-        lightMul[0] = 1.02f; lightMul[1] = 1.01f; lightMul[2] = 0.97f;
+        // Safehouse & Heat: crisp Caucasus highland contrast with clear forest shadows
+        contrastMul = 1.03f;
+        brightnessOffset = 0.0f;
+        darkMul[0] = 0.96f; darkMul[1] = 0.98f; darkMul[2] = 0.96f;
+        lightMul[0] = 1.01f; lightMul[1] = 1.01f; lightMul[2] = 0.98f;
     }
     else if (I_stricmp(mapName, "scoutsnipers") == 0 ||
              I_stricmp(mapName, "sniperescape") == 0)
     {
         // All Ghillied Up & One Shot, One Kill: atmospheric Pripyat cold overcast filter
-        contrastMul = 1.08f;
-        brightnessOffset = -0.014f;
-        desatMul = 1.10f;
-        darkMul[0] = 0.90f; darkMul[1] = 0.95f; darkMul[2] = 1.02f;
-        lightMul[0] = 0.98f; lightMul[1] = 1.00f; lightMul[2] = 1.03f;
+        contrastMul = 1.04f;
+        brightnessOffset = 0.0f;
+        desatMul = 1.04f;
+        darkMul[0] = 0.94f; darkMul[1] = 0.97f; darkMul[2] = 1.01f;
+        lightMul[0] = 0.99f; lightMul[1] = 1.00f; lightMul[2] = 1.02f;
     }
     else if (I_stricmp(mapName, "icbm") == 0 ||
              I_stricmp(mapName, "launchfacility_a") == 0 ||
@@ -2563,10 +2561,10 @@ static void R_ApplyVrLightingAndLevelFilter(GfxViewInfo *viewInfo)
              I_stricmp(mapName, "airplane") == 0)
     {
         // Altay Mountains / Silo / Escape / Mile High Club: cold steel tactical contrast
-        contrastMul = 1.07f;
-        brightnessOffset = -0.012f;
-        darkMul[0] = 0.91f; darkMul[1] = 0.95f; darkMul[2] = 1.03f;
-        lightMul[0] = 1.01f; lightMul[1] = 1.01f; lightMul[2] = 1.04f;
+        contrastMul = 1.03f;
+        brightnessOffset = 0.0f;
+        darkMul[0] = 0.95f; darkMul[1] = 0.97f; darkMul[2] = 1.02f;
+        lightMul[0] = 1.01f; lightMul[1] = 1.01f; lightMul[2] = 1.02f;
     }
 
     viewInfo->film.contrast *= contrastMul;
@@ -2689,11 +2687,11 @@ void __cdecl R_SetGlowInfo(GfxViewInfo *viewInfo, const GfxSceneParms *sceneParm
 #ifdef KISAK_SP
     if (VR_IsInitialized())
     {
-        viewInfo->glow.bloomIntensity *= 0.72f;
-        if (viewInfo->glow.bloomCutoff < 0.88f)
+        viewInfo->glow.bloomIntensity *= 0.90f;
+        if (viewInfo->glow.bloomCutoff < 0.75f)
         {
             viewInfo->glow.bloomCutoff =
-                viewInfo->glow.bloomCutoff + (0.88f - viewInfo->glow.bloomCutoff) * 0.45f;
+                viewInfo->glow.bloomCutoff + (0.75f - viewInfo->glow.bloomCutoff) * 0.25f;
         }
     }
 #endif

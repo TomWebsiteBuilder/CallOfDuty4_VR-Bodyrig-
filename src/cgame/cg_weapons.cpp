@@ -7790,6 +7790,78 @@ void VR_FreeManualReloadClipRenderObjectsForShutdown()
     VR_FreeFloatingLeftHandRenderObjects();
 }
 
+static bool VR_GetModelClipBoneTransform(
+    const XModel* model,
+    int* outClipBoneIndex,
+    float outBaseTrans[3],
+    float outBaseAxis[3][3])
+{
+    if (model == nullptr || model->numBones <= 1)
+    {
+        return false;
+    }
+
+    const int clipBoneIndex = VR_FindModelBoneIndex(model, "tag_clip");
+    if (clipBoneIndex < 0)
+    {
+        return false;
+    }
+
+    if (outClipBoneIndex != nullptr)
+    {
+        *outClipBoneIndex = clipBoneIndex;
+    }
+
+    const DObjAnimMat* basePose = XModelGetBasePose(model);
+    if (basePose == nullptr)
+    {
+        return false;
+    }
+
+    if (outBaseTrans != nullptr)
+    {
+        outBaseTrans[0] = basePose[clipBoneIndex].trans[0];
+        outBaseTrans[1] = basePose[clipBoneIndex].trans[1];
+        outBaseTrans[2] = basePose[clipBoneIndex].trans[2];
+    }
+
+    if (outBaseAxis != nullptr)
+    {
+        mat3x3 baseMatAxis = {};
+        UnitQuatToAxis(basePose[clipBoneIndex].quat, baseMatAxis);
+        std::memcpy(outBaseAxis, baseMatAxis, sizeof(baseMatAxis));
+    }
+
+    return true;
+}
+
+static void VR_SetupClipDObjHideParts(DObj_s* dobj, const XModel* model)
+{
+    if (dobj == nullptr || model == nullptr)
+    {
+        return;
+    }
+
+    int clipBoneIndex = -1;
+    if (!VR_GetModelClipBoneTransform(model, &clipBoneIndex, nullptr, nullptr) || clipBoneIndex < 0)
+    {
+        uint32_t clearBits[4] = { 0u, 0u, 0u, 0u };
+        DObjSetHidePartBits(dobj, clearBits);
+        return;
+    }
+
+    uint32_t hideBits[4] = { 0u, 0u, 0u, 0u };
+    for (int bone = 0; bone < model->numBones; ++bone)
+    {
+        if (!VR_ModelBoneDescendsFrom(model, bone, clipBoneIndex))
+        {
+            hideBits[bone >> 5] |= (0x80000000u >> (bone & 0x1F));
+        }
+    }
+
+    DObjSetHidePartBits(dobj, hideBits);
+}
+
 static VrManualReloadClipRenderObject*
 VR_GetManualReloadClipRenderObject(
     const uint32_t weaponNum,
@@ -7829,6 +7901,8 @@ VR_GetManualReloadClipRenderObject(
             &clipObject.object,
             0);
 
+        VR_SetupClipDObjHideParts(&clipObject.object, clipModel);
+
         clipObject.model = clipModel;
         clipObject.created = true;
 
@@ -7852,7 +7926,8 @@ VR_GetManualReloadClipRenderObject(
 static void VR_SetManualReloadClipPose(
     cpose_t* pose,
     const float origin[3],
-    const float axis[3][3])
+    const float axis[3][3],
+    const XModel* model = nullptr)
 {
     if (pose == nullptr ||
         origin == nullptr ||
@@ -7861,13 +7936,51 @@ static void VR_SetManualReloadClipPose(
         return;
     }
 
-    pose->origin[0] = origin[0];
-    pose->origin[1] = origin[1];
-    pose->origin[2] = origin[2];
+    int clipBoneIndex = -1;
+    float baseTrans[3] = {};
+    float baseAxis[3][3] = {};
 
-    AxisToAngles(
-        *reinterpret_cast<const mat3x3*>(axis),
-        pose->angles);
+    if (model != nullptr &&
+        VR_GetModelClipBoneTransform(model, &clipBoneIndex, baseTrans, baseAxis))
+    {
+        mat3x3 baseAxisTranspose = {};
+        MatrixTranspose(
+            *reinterpret_cast<const mat3x3*>(baseAxis),
+            baseAxisTranspose);
+
+        mat3x3 dobjAxis = {};
+        MatrixMultiply(
+            baseAxisTranspose,
+            *reinterpret_cast<const mat3x3*>(axis),
+            dobjAxis);
+
+        float dobjOrigin[3] = { origin[0], origin[1], origin[2] };
+        for (int c = 0; c < 3; ++c)
+        {
+            dobjOrigin[c] -=
+                baseTrans[0] * dobjAxis[0][c] +
+                baseTrans[1] * dobjAxis[1][c] +
+                baseTrans[2] * dobjAxis[2][c];
+        }
+
+        pose->origin[0] = dobjOrigin[0];
+        pose->origin[1] = dobjOrigin[1];
+        pose->origin[2] = dobjOrigin[2];
+
+        AxisToAngles(
+            dobjAxis,
+            pose->angles);
+    }
+    else
+    {
+        pose->origin[0] = origin[0];
+        pose->origin[1] = origin[1];
+        pose->origin[2] = origin[2];
+
+        AxisToAngles(
+            *reinterpret_cast<const mat3x3*>(axis),
+            pose->angles);
+    }
 }
 
 
@@ -8023,6 +8136,153 @@ static void VR_AddManualGrenadeModelToScene(
         0.0f);
 }
 
+void VR_ResolveCarriedWeaponSlots(
+    const uint32_t weapons[4],
+    uint32_t currentWeapon,
+    int* outSlot1Weapon,
+    int* outSlot2Weapon)
+{
+    static int s_persistentSlot1 = 0;
+    static int s_persistentSlot2 = 0;
+
+    auto isCarriedFirearm = [](const uint32_t weapBits[4], int w) -> bool
+    {
+        if (w <= 0 || !Com_BitCheckAssert(weapBits, w, 16))
+        {
+            return false;
+        }
+        const WeaponDef* def = BG_GetWeaponDef(w);
+        if (def == nullptr ||
+            def->inventoryType == WEAPINVENTORY_ALTMODE ||
+            def->inventoryType == WEAPINVENTORY_ITEM ||
+            def->inventoryType == WEAPINVENTORY_OFFHAND)
+        {
+            return false;
+        }
+        return true;
+    };
+
+    uint32_t activeBaseWeapon = currentWeapon;
+    if (activeBaseWeapon > 0u)
+    {
+        const WeaponDef* curDef = BG_GetWeaponDef(activeBaseWeapon);
+        if (curDef != nullptr &&
+            curDef->inventoryType == WEAPINVENTORY_ALTMODE &&
+            curDef->altWeaponIndex > 0u)
+        {
+            activeBaseWeapon = curDef->altWeaponIndex;
+        }
+    }
+
+    int carried[16];
+    int carriedCount = 0;
+    const int highestWeap = BG_GetNumWeapons() - 1;
+    for (int w = 1; w <= highestWeap; ++w)
+    {
+        if (isCarriedFirearm(weapons, w))
+        {
+            if (carriedCount < 16)
+            {
+                carried[carriedCount++] = w;
+            }
+        }
+    }
+
+    if (carriedCount == 0)
+    {
+        s_persistentSlot1 = 0;
+        s_persistentSlot2 = 0;
+    }
+    else if (carriedCount == 1)
+    {
+        const WeaponDef* def = BG_GetWeaponDef(carried[0]);
+        if (def != nullptr && def->weapClass == WEAPCLASS_PISTOL)
+        {
+            s_persistentSlot1 = carried[0];
+            s_persistentSlot2 = 0;
+        }
+        else
+        {
+            s_persistentSlot1 = 0;
+            s_persistentSlot2 = carried[0];
+        }
+    }
+    else
+    {
+        int pistolIndex = 0;
+        int primaryIndex = 0;
+        for (int i = 0; i < carriedCount; ++i)
+        {
+            const WeaponDef* def = BG_GetWeaponDef(carried[i]);
+            if (def != nullptr && def->weapClass == WEAPCLASS_PISTOL)
+            {
+                if (pistolIndex == 0)
+                {
+                    pistolIndex = carried[i];
+                }
+            }
+            else
+            {
+                if (primaryIndex == 0)
+                {
+                    primaryIndex = carried[i];
+                }
+            }
+        }
+
+        if (pistolIndex != 0 && primaryIndex != 0)
+        {
+            // Standard Primary + Sidearm loadout: Pistol always belongs in Hip Holster (Slot 1), Primary in Sling (Slot 2).
+            s_persistentSlot1 = pistolIndex;
+            s_persistentSlot2 = primaryIndex;
+        }
+        else if (primaryIndex == 0)
+        {
+            // All pistols: slot 1 is first pistol, slot 2 is second pistol.
+            s_persistentSlot1 = carried[0];
+            s_persistentSlot2 = carried[1];
+        }
+        else
+        {
+            // Dual Primaries (e.g. Mission "Blackout" M4 SOPMOD + M21 Sniper Rifle):
+            // Check if current persistent assignment already contains both carried primaries.
+            const bool persistentValid =
+                (s_persistentSlot1 == carried[0] && s_persistentSlot2 == carried[1]) ||
+                (s_persistentSlot1 == carried[1] && s_persistentSlot2 == carried[0]);
+
+            if (!persistentValid)
+            {
+                // Establish initial slots: the weapon currently in hand (or carried[0]) gets Shoulder Sling (Slot 2),
+                // and the secondary firearm gets Hip Holster (Slot 1).
+                if (activeBaseWeapon == static_cast<uint32_t>(carried[0]))
+                {
+                    s_persistentSlot2 = carried[0];
+                    s_persistentSlot1 = carried[1];
+                }
+                else if (activeBaseWeapon == static_cast<uint32_t>(carried[1]))
+                {
+                    s_persistentSlot2 = carried[1];
+                    s_persistentSlot1 = carried[0];
+                }
+                else
+                {
+                    s_persistentSlot2 = carried[0];
+                    s_persistentSlot1 = carried[1];
+                }
+            }
+        }
+    }
+
+    if (outSlot1Weapon != nullptr)
+    {
+        *outSlot1Weapon = s_persistentSlot1;
+    }
+    if (outSlot2Weapon != nullptr)
+    {
+        *outSlot2Weapon = s_persistentSlot2;
+    }
+}
+
 static XModel* VR_ResolveWeaponClipModel(const WeaponDef* weapDef)
 {
     if (weapDef == nullptr)
@@ -8033,6 +8293,20 @@ static XModel* VR_ResolveWeaponClipModel(const WeaponDef* weapDef)
     if (weapDef->worldClipModel != nullptr)
     {
         return weapDef->worldClipModel;
+    }
+
+    // Pistols and weapons without a standalone worldClipModel:
+    // Extract the magazine directly from the weapon viewmodel / gunXModel[0].
+    if (weapDef->gunXModel[0] != nullptr &&
+        VR_FindModelBoneIndex(weapDef->gunXModel[0], "tag_clip") >= 0)
+    {
+        return weapDef->gunXModel[0];
+    }
+
+    if (weapDef->worldModel[0] != nullptr &&
+        VR_FindModelBoneIndex(weapDef->worldModel[0], "tag_clip") >= 0)
+    {
+        return weapDef->worldModel[0];
     }
 
     // Pistols and some other weapons in COD4 do not specify a worldClipModel.
@@ -8139,10 +8413,12 @@ static void VR_AddManualReloadClipModelsToScene(
 
     if (drawEjectedMagazine)
     {
+        VR_SetupClipDObjHideParts(&clipObject->object, clipModel);
         VR_SetManualReloadClipPose(
             &clipObject->ejectedPose,
             ejectedOrigin,
-            ejectedAxis);
+            ejectedAxis,
+            clipModel);
 
         R_AddDObjToScene(
             &clipObject->object,
@@ -8169,10 +8445,12 @@ static void VR_AddManualReloadClipModelsToScene(
             }
         }
 
+        VR_SetupClipDObjHideParts(&clipObject->object, clipModel);
         VR_SetManualReloadClipPose(
             &clipObject->heldPose,
             heldOrigin,
-            heldAxis);
+            heldAxis,
+            clipModel);
 
         R_AddDObjToScene(
             &clipObject->object,
@@ -8189,7 +8467,8 @@ static void VR_SubmitBodyHolsterPropToScene(
     XModel* model,
     const float origin[3],
     const float axis[3][3],
-    const float lightingOrigin[3])
+    const float lightingOrigin[3],
+    bool isClip = false)
 {
     if (propObject == nullptr ||
         model == nullptr ||
@@ -8221,15 +8500,40 @@ static void VR_SubmitBodyHolsterPropToScene(
             &propObject->object,
             0);
 
+        if (isClip)
+        {
+            VR_SetupClipDObjHideParts(&propObject->object, model);
+        }
+        else
+        {
+            uint32_t clearBits[4] = { 0u, 0u, 0u, 0u };
+            DObjSetHidePartBits(&propObject->object, clearBits);
+        }
+
         propObject->model = model;
         propObject->created = true;
         propObject->pose.eType = ET_GENERAL;
     }
 
-    VR_SetManualReloadClipPose(
-        &propObject->pose,
-        origin,
-        axis);
+    if (isClip)
+    {
+        VR_SetupClipDObjHideParts(&propObject->object, model);
+        VR_SetManualReloadClipPose(
+            &propObject->pose,
+            origin,
+            axis,
+            model);
+    }
+    else
+    {
+        uint32_t clearBits[4] = { 0u, 0u, 0u, 0u };
+        DObjSetHidePartBits(&propObject->object, clearBits);
+        VR_SetManualReloadClipPose(
+            &propObject->pose,
+            origin,
+            axis,
+            nullptr);
+    }
 
     float mutableLightingOrigin[3] = {
         lightingOrigin[0],
@@ -8922,21 +9226,22 @@ static void VR_AddPhysicalBodyRigToScene(
         bodyState.leftWrist[1],
         bodyState.leftWrist[2],
     };
-    if (manualGrenadeHeld && !VR_IsManualGrenadeHeldInWeaponHand())
-    {
-        for (int i = 0; i < 3; ++i)
-        {
-            leftWristWorld[i] =
-                heldGrenadeOrigin[i] -
-                heldGrenadeAxis[0][i] * 2.0f;
-        }
-    }
-    else if (s_vrLastRenderedLeftWristValid)
+    if (s_vrLastRenderedLeftWristValid)
     {
         std::memcpy(
             leftWristWorld,
             s_vrLastRenderedLeftWristOrigin,
             sizeof(leftWristWorld));
+    }
+    else if (manualGrenadeHeld && !VR_IsManualGrenadeHeldInWeaponHand())
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            leftWristWorld[i] =
+                heldGrenadeOrigin[i] -
+                heldGrenadeAxis[0][i] * 3.5f -
+                heldGrenadeAxis[2][i] * 0.4f;
+        }
     }
     else
     {
@@ -9004,6 +9309,7 @@ static void VR_AddPhysicalBodyRigToScene(
             SL_FindString("j_wrist_ri");
         float tagAxis[3][3] = {};
         float tagOrigin[3] = {};
+        bool tagValid = false;
         if (rightWristTag != 0u &&
             CG_DObjGetWorldTagMatrix(
                 weaponPose,
@@ -9012,14 +9318,47 @@ static void VR_AddPhysicalBodyRigToScene(
                 tagAxis,
                 tagOrigin) != 0)
         {
-            std::memcpy(
+            float controllerGrip[3] = {};
+            if (VR_GetRightControllerGripWorld(cameraOrigin, cameraAxis, controllerGrip, nullptr))
+            {
+                const float dx = tagOrigin[0] - controllerGrip[0];
+                const float dy = tagOrigin[1] - controllerGrip[1];
+                const float dz = tagOrigin[2] - controllerGrip[2];
+                const float distSq = dx * dx + dy * dy + dz * dz;
+                if (distSq < 100.0f)
+                {
+                    tagValid = true;
+                    std::memcpy(
+                        rightWristWorld,
+                        tagOrigin,
+                        sizeof(rightWristWorld));
+                    std::memcpy(
+                        rightWristAxisWorld,
+                        tagAxis,
+                        sizeof(rightWristAxisWorld));
+                }
+            }
+            else
+            {
+                tagValid = true;
+                std::memcpy(
+                    rightWristWorld,
+                    tagOrigin,
+                    sizeof(rightWristWorld));
+                std::memcpy(
+                    rightWristAxisWorld,
+                    tagAxis,
+                    sizeof(rightWristAxisWorld));
+            }
+        }
+
+        if (!tagValid)
+        {
+            VR_GetRightControllerGripWorld(
+                cameraOrigin,
+                cameraAxis,
                 rightWristWorld,
-                tagOrigin,
-                sizeof(rightWristWorld));
-            std::memcpy(
-                rightWristAxisWorld,
-                tagAxis,
-                sizeof(rightWristAxisWorld));
+                rightWristAxisWorld);
         }
     }
 
@@ -9677,53 +10016,49 @@ static void VR_AddPhysicalBodyRigToScene(
         return;
     }
 
-    // 2. Render Holstered Secondary (Right Hip) and Stowed Primary (Chest Sling).
-    XModel* holsteredSidearmModel = nullptr;
-    XModel* holsteredPrimaryModel = nullptr;
+    // 2. Render Holstered Secondary / Sidearm (Right Hip) and Stowed Primary (Chest/Shoulder Sling).
+    int slot1Weapon = 0;
+    int slot2Weapon = 0;
+    VR_ResolveCarriedWeaponSlots(
+        ps->weapons,
+        ps->weapon,
+        &slot1Weapon,
+        &slot2Weapon);
 
-    const uint32_t totalWeapons = BG_GetNumWeapons();
-    for (uint32_t candidateIndex = 1u;
-         candidateIndex < totalWeapons;
-         ++candidateIndex)
+    uint32_t activeBaseWeapon = ps->weapon;
+    if (activeBaseWeapon > 0u)
     {
-        if (candidateIndex == weaponNum &&
-            !(bodyState.knifeDrawn && bodyState.knifeHandIndex == 1) &&
-            !VR_IsPhysicalWeaponHolstered())
+        const WeaponDef* curDef = BG_GetWeaponDef(activeBaseWeapon);
+        if (curDef != nullptr &&
+            curDef->inventoryType == WEAPINVENTORY_ALTMODE &&
+            curDef->altWeaponIndex > 0u)
         {
-            continue;
+            activeBaseWeapon = curDef->altWeaponIndex;
         }
+    }
 
-        if (!Com_BitCheckAssert(ps->weapons, candidateIndex, 16))
-        {
-            continue;
-        }
+    const bool handsEmptyOrKnife =
+        VR_IsPhysicalWeaponHolstered() ||
+        (bodyState.knifeDrawn && bodyState.knifeHandIndex == 1);
 
-        const WeaponDef* candidateDef = BG_GetWeaponDef(candidateIndex);
-        if (candidateDef == nullptr ||
-            candidateDef->inventoryType == WEAPINVENTORY_ALTMODE ||
-            candidateDef->inventoryType == WEAPINVENTORY_ITEM ||
-            candidateDef->inventoryType == WEAPINVENTORY_OFFHAND)
-        {
-            continue;
-        }
+    XModel* holsteredSidearmModel = nullptr;
 
-        XModel* candidateModel =
-            candidateDef->worldModel[0] != nullptr
-                ? candidateDef->worldModel[0]
-                : candidateDef->gunXModel[0];
-        if (candidateModel == nullptr)
+    // Slot 1: Hip Holster
+    if (slot1Weapon > 0)
+    {
+        const bool slot1InHand =
+            !handsEmptyOrKnife &&
+            (activeBaseWeapon == static_cast<uint32_t>(slot1Weapon));
+        if (!slot1InHand)
         {
-            continue;
-        }
-
-        if (candidateDef->weapClass == WEAPCLASS_PISTOL &&
-            holsteredSidearmModel == nullptr)
-        {
-            holsteredSidearmModel = candidateModel;
-        }
-        else if (holsteredPrimaryModel == nullptr)
-        {
-            holsteredPrimaryModel = candidateModel;
+            const WeaponDef* candidateDef = BG_GetWeaponDef(slot1Weapon);
+            if (candidateDef != nullptr)
+            {
+                holsteredSidearmModel =
+                    candidateDef->worldModel[0] != nullptr
+                        ? candidateDef->worldModel[0]
+                        : candidateDef->gunXModel[0];
+            }
         }
     }
 
@@ -9734,10 +10069,15 @@ static void VR_AddPhysicalBodyRigToScene(
             holsteredSidearmModel,
             bodyState.hipHolsterOrigin,
             bodyState.hipHolsterAxis,
-            lightingOrigin);
+            lightingOrigin,
+            false);
+    }
+    else if (s_vrHolsteredSidearmObject.created)
+    {
+        VR_FreeBodyHolsterPropRenderObject(&s_vrHolsteredSidearmObject);
     }
 
-    // 2. Primary weapon is invisible on the body rig per user request.
+    // Primary weapon is slung on the back over the shoulder and remains invisible on the body rig per user request.
     if (s_vrHolsteredPrimaryObject.created)
     {
         VR_FreeBodyHolsterPropRenderObject(&s_vrHolsteredPrimaryObject);
@@ -9756,7 +10096,12 @@ static void VR_AddPhysicalBodyRigToScene(
             bodyState.knifeDrawn
                 ? bodyState.heldKnifeAxis
                 : bodyState.knifeSheathAxis,
-            lightingOrigin);
+            lightingOrigin,
+            false);
+    }
+    else if (s_vrHolsteredKnifeObject.created)
+    {
+        VR_FreeBodyHolsterPropRenderObject(&s_vrHolsteredKnifeObject);
     }
 
     // 4. Render Spare Magazine in the Hip Magazine Pouch.
@@ -9771,50 +10116,24 @@ static void VR_AddPhysicalBodyRigToScene(
             primaryClipModel,
             bodyState.magPouchOrigin,
             bodyState.magPouchAxis,
-            lightingOrigin);
+            lightingOrigin,
+            true);
+    }
+    else if (s_vrHolsteredSpareMagObject.created)
+    {
+        VR_FreeBodyHolsterPropRenderObject(&s_vrHolsteredSpareMagObject);
     }
 
     // 4b. Render Secondary Magazine in the Dedicated Secondary Magazine Holder.
-    uint32_t secondaryWeaponNum = 0u;
-    const WeaponDef* secondaryDef = nullptr;
-    XModel* secondaryClipModel = nullptr;
+    const uint32_t secondaryWeaponNum =
+        (activeBaseWeapon == static_cast<uint32_t>(slot2Weapon))
+            ? static_cast<uint32_t>(slot1Weapon)
+            : static_cast<uint32_t>(slot2Weapon);
 
-    for (uint32_t candIdx = 1u; candIdx < totalWeapons; ++candIdx)
-    {
-        if (candIdx == weaponNum)
-        {
-            continue;
-        }
-        if (!Com_BitCheckAssert(ps->weapons, candIdx, 16))
-        {
-            continue;
-        }
-        const WeaponDef* candDef = BG_GetWeaponDef(candIdx);
-        if (candDef == nullptr ||
-            candDef->inventoryType == WEAPINVENTORY_ALTMODE ||
-            candDef->inventoryType == WEAPINVENTORY_ITEM ||
-            candDef->inventoryType == WEAPINVENTORY_OFFHAND)
-        {
-            continue;
-        }
-        if (candDef->weapType != WEAPTYPE_BULLET)
-        {
-            continue;
-        }
-
-        if (secondaryWeaponNum == 0u ||
-            (weapDef != nullptr && weapDef->weapClass != WEAPCLASS_PISTOL && candDef->weapClass == WEAPCLASS_PISTOL) ||
-            (weapDef != nullptr && weapDef->weapClass == WEAPCLASS_PISTOL && candDef->weapClass != WEAPCLASS_PISTOL))
-        {
-            secondaryWeaponNum = candIdx;
-            secondaryDef = candDef;
-        }
-    }
-
-    if (secondaryDef != nullptr)
-    {
-        secondaryClipModel = VR_ResolveWeaponClipModel(secondaryDef);
-    }
+    const WeaponDef* secondaryDef =
+        (secondaryWeaponNum > 0u) ? BG_GetWeaponDef(secondaryWeaponNum) : nullptr;
+    XModel* secondaryClipModel =
+        (secondaryDef != nullptr) ? VR_ResolveWeaponClipModel(secondaryDef) : nullptr;
 
     if (secondaryClipModel != nullptr && secondaryWeaponNum > 0u)
     {
@@ -9826,8 +10145,17 @@ static void VR_AddPhysicalBodyRigToScene(
                 secondaryClipModel,
                 bodyState.secMagPouchOrigin,
                 bodyState.secMagPouchAxis,
-                lightingOrigin);
+                lightingOrigin,
+                true);
         }
+        else if (s_vrHolsteredSecMagObject.created)
+        {
+            VR_FreeBodyHolsterPropRenderObject(&s_vrHolsteredSecMagObject);
+        }
+    }
+    else if (s_vrHolsteredSecMagObject.created)
+    {
+        VR_FreeBodyHolsterPropRenderObject(&s_vrHolsteredSecMagObject);
     }
 
     // 5. Render Frag Grenade on the Belt Pouch (unless currently held in hand).
@@ -9854,8 +10182,17 @@ static void VR_AddPhysicalBodyRigToScene(
                 grenadeModel,
                 bodyState.grenadePouchOrigin,
                 bodyState.grenadePouchAxis,
-                lightingOrigin);
+                lightingOrigin,
+                false);
         }
+        else if (s_vrHolsteredGrenadeObject.created)
+        {
+            VR_FreeBodyHolsterPropRenderObject(&s_vrHolsteredGrenadeObject);
+        }
+    }
+    else if (s_vrHolsteredGrenadeObject.created)
+    {
+        VR_FreeBodyHolsterPropRenderObject(&s_vrHolsteredGrenadeObject);
     }
 
     // 6. Render Flashbang / Tactical Smoke on the Tactical Chest Vest Anchor (unless currently held in hand).
@@ -9885,8 +10222,17 @@ static void VR_AddPhysicalBodyRigToScene(
                 tacticalModel,
                 bodyState.tacticalPouchOrigin,
                 bodyState.tacticalPouchAxis,
-                lightingOrigin);
+                lightingOrigin,
+                false);
         }
+        else if (s_vrHolsteredTacticalObject.created)
+        {
+            VR_FreeBodyHolsterPropRenderObject(&s_vrHolsteredTacticalObject);
+        }
+    }
+    else if (s_vrHolsteredTacticalObject.created)
+    {
+        VR_FreeBodyHolsterPropRenderObject(&s_vrHolsteredTacticalObject);
     }
 }
 #endif
@@ -11258,20 +11604,20 @@ void __cdecl CG_AddPlayerWeapon(
                     switch (weapDef->weapClass)
                     {
                         case WEAPCLASS_PISTOL:
-                            slideTravelInches = 1.30f;
+                            slideTravelInches = 1.85f;
                             break;
                         case WEAPCLASS_SMG:
-                            slideTravelInches = 1.85f;
+                            slideTravelInches = 2.25f;
                             break;
                         case WEAPCLASS_RIFLE:
                         case WEAPCLASS_MG:
-                            slideTravelInches = 2.35f;
+                            slideTravelInches = 2.65f;
                             break;
                         case WEAPCLASS_SPREAD:
-                            slideTravelInches = 2.80f;
+                            slideTravelInches = 3.0f;
                             break;
                         default:
-                            slideTravelInches = 2.0f;
+                            slideTravelInches = 2.25f;
                             break;
                     }
                 }
@@ -11362,6 +11708,37 @@ void __cdecl CG_AddPlayerWeapon(
                     }
                 }
 
+                if (VR_ConsumeManualReloadBoltPullSoundPending(static_cast<int>(weaponNum)))
+                {
+                    if (weapDef->pullbackSoundPlayer != nullptr)
+                    {
+                        CG_PlayEntitySoundAlias(
+                            0,
+                            cgameGlob->clientNum,
+                            weapDef->pullbackSoundPlayer);
+                    }
+                    else
+                    {
+                        const char* pullSound = "weap_usp45sd_slmn_y1";
+                        if (weapDef->szInternalName != nullptr)
+                        {
+                            if (strstr(weapDef->szInternalName, "deserteagle"))
+                            {
+                                pullSound = "weap_deserteagle_slmn_2";
+                            }
+                            else if (strstr(weapDef->szInternalName, "m9") ||
+                                     strstr(weapDef->szInternalName, "colt45"))
+                            {
+                                pullSound = "weap_m9_chamber_plr";
+                            }
+                        }
+                        CG_PlayEntitySoundAliasByName(
+                            0,
+                            cgameGlob->clientNum,
+                            pullSound);
+                    }
+                }
+
                 if (VR_ConsumeManualReloadBoltRackSoundPending(static_cast<int>(weaponNum)))
                 {
                     if (weapDef->rechamberSoundPlayer != nullptr)
@@ -11391,6 +11768,25 @@ void __cdecl CG_AddPlayerWeapon(
                             0,
                             cgameGlob->clientNum,
                             weapDef->reloadEmptySoundPlayer);
+                    }
+                    else
+                    {
+                        const char* rackSound = "weap_usp45_slmn_y1b";
+                        if (weapDef->szInternalName != nullptr)
+                        {
+                            if (strstr(weapDef->szInternalName, "deserteagle"))
+                            {
+                                rackSound = "weap_de50_chamber_plr";
+                            }
+                            else if (strstr(weapDef->szInternalName, "m9"))
+                            {
+                                rackSound = "weap_m9_chamber_plr";
+                            }
+                        }
+                        CG_PlayEntitySoundAliasByName(
+                            0,
+                            cgameGlob->clientNum,
+                            rackSound);
                     }
                 }
 
@@ -11880,7 +12276,16 @@ void __cdecl CG_UpdateViewWeaponAnim(int32_t localClientNum)
     ps = &cgameGlob->predictedPlayerState;
     if (cgameGlob->predictedPlayerState.pm_type < PM_DEAD)
     {
+#ifdef KISAK_SP
+        const bool manualGrenadeAnimOverride =
+            ps->weapon > 0 &&
+            VR_IsManualGrenadeViewOverrideActive();
+        weaponIndex = manualGrenadeAnimOverride
+            ? ps->weapon
+            : BG_GetViewmodelWeaponIndex(ps);
+#else
         weaponIndex = BG_GetViewmodelWeaponIndex(ps);
+#endif
         if (weaponIndex > 0)
         {
             VR_JavelinDiagnostic("animation: frame begin", weaponIndex);
@@ -11924,7 +12329,16 @@ void __cdecl WeaponRunXModelAnims(int32_t localClientNum, const playerState_s* p
     obj = weapInfo->viewModelDObj;
     iassert(obj);
     pAnimTree = DObjGetTree(obj);
+#ifdef KISAK_SP
+    const bool manualGrenadeAnimOverride =
+        ps->weapon > 0 &&
+        VR_IsManualGrenadeViewOverrideActive();
+    weaponIndex = manualGrenadeAnimOverride
+        ? ps->weapon
+        : BG_GetViewmodelWeaponIndex(ps);
+#else
     weaponIndex = BG_GetViewmodelWeaponIndex(ps);
+#endif
     iassert(weaponIndex > WP_NONE);
     weapDef = BG_GetWeaponDef(weaponIndex);
     if (weapDef->aimDownSight)
@@ -11941,7 +12355,16 @@ void __cdecl WeaponRunXModelAnims(int32_t localClientNum, const playerState_s* p
     if (ps->weapAnim != weapInfo->iPrevAnim || weaponIndex != cgameGlob->prevViewmodelWeapon)
     {
         transitionTime = 0.0;
-        switch (ps->weapAnim & 0xFFFFFDFF)
+        int animCode = ps->weapAnim & 0xFFFFFDFF;
+#ifdef KISAK_SP
+        if (manualGrenadeAnimOverride && (animCode == 19 || animCode == 26))
+        {
+            // Do not play canned offhand quick-drop or grenade prep animations on the firearm in VR.
+            // Leave the firearm in its natural idle pose in the right hand.
+            animCode = 1;
+        }
+#endif
+        switch (animCode)
         {
         case 0u:
         case 1u:
@@ -12771,7 +13194,17 @@ void __cdecl CG_AddViewWeapon(int32_t localClientNum)
         if ((ps->eFlags & 0x300) == 0)
 #endif
         {
+#ifdef KISAK_SP
+            const bool manualGrenadeViewOverride =
+                drawgun &&
+                ps->weapon > 0 &&
+                VR_IsManualGrenadeViewOverrideActive();
+            weaponIndex = manualGrenadeViewOverride
+                ? ps->weapon
+                : BG_GetViewmodelWeaponIndex(ps);
+#else
             weaponIndex = BG_GetViewmodelWeaponIndex(ps);
+#endif
             if (weaponIndex <= 0)
             {
                 cgameGlob->gunPitch = cgameGlob->refdefViewAngles[0];
@@ -12787,8 +13220,14 @@ void __cdecl CG_AddViewWeapon(int32_t localClientNum)
                         ps->origin[1],
                         ps->origin[2] + ps->viewHeightCurrent,
                     };
-                    float dummyHeldOrigin[3] = {};
-                    float dummyHeldAxis[3][3] = {};
+                    int unarmedHeldGrenadeIndex = 0;
+                    float unarmedHeldGrenadeOrigin[3] = {};
+                    float unarmedHeldGrenadeAxis[3][3] = {};
+                    const bool unarmedGrenadeHeld = VR_GetManualGrenadeRenderState(
+                        &unarmedHeldGrenadeIndex,
+                        unarmedHeldGrenadeOrigin,
+                        unarmedHeldGrenadeAxis);
+
                     VR_AddFloatingLeftHandToScene(
                         0,
                         nullptr,
@@ -12798,9 +13237,12 @@ void __cdecl CG_AddViewWeapon(int32_t localClientNum)
                         cgameGlob->refdef.vieworg,
                         cgameGlob->refdef.viewaxis,
                         unarmedLightingOrigin,
-                        false,
-                        dummyHeldOrigin,
-                        dummyHeldAxis);
+                        unarmedGrenadeHeld && !VR_IsManualGrenadeHeldInWeaponHand(),
+                        unarmedHeldGrenadeOrigin,
+                        unarmedHeldGrenadeAxis);
+
+                    VR_AddManualGrenadeModelToScene(
+                        unarmedLightingOrigin);
 
                     VR_AddPhysicalBodyRigToScene(
                         0u,

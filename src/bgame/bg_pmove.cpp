@@ -3134,12 +3134,21 @@ void __cdecl PM_CheckDuck(pmove_t *pm, pml_t *pml)
     else
     {
         bWasProne = (ps->pm_flags & PMF_PRONE) != 0;
+#ifdef KISAK_SP
+        pm->mins[0] = -13.5f;
+        pm->mins[1] = -13.5f;
+        pm->mins[2] = 0.0f;
+        pm->maxs[0] = 13.5f;
+        pm->maxs[1] = 13.5f;
+        pm->maxs[2] = 66.0f;
+#else
         pm->mins[0] = -15.0;
         pm->mins[1] = -15.0;
         pm->mins[2] = 0.0;
         pm->maxs[0] = 15.0;
         pm->maxs[1] = 15.0;
         pm->maxs[2] = 70.0;
+#endif
         if (ps->pm_type == PM_DEAD)
         {
             ps->viewHeightTarget = 8;
@@ -3376,7 +3385,15 @@ void __cdecl PM_CheckDuck(pmove_t *pm, pml_t *pml)
             }
             else if (iStance == 2)
             {
+#ifdef KISAK_SP
+                pm->mins[0] = -12.0f;
+                pm->mins[1] = -12.0f;
+                pm->maxs[0] = 12.0f;
+                pm->maxs[1] = 12.0f;
+                pm->maxs[2] = 48.0f;
+#else
                 pm->maxs[2] = 50.0;
+#endif
                 ps->eFlags |= 4u;
                 ps->eFlags &= ~8u;
                 ps->pm_flags |= PMF_DUCKED;
@@ -3384,7 +3401,15 @@ void __cdecl PM_CheckDuck(pmove_t *pm, pml_t *pml)
             }
             else
             {
+#ifdef KISAK_SP
+                pm->mins[0] = -13.5f;
+                pm->mins[1] = -13.5f;
+                pm->maxs[0] = 13.5f;
+                pm->maxs[1] = 13.5f;
+                pm->maxs[2] = 66.0f;
+#else
                 pm->maxs[2] = 70.0;
+#endif
                 ps->eFlags &= 0xFFFFFFF3;
                 ps->pm_flags &= ~(PMF_PRONE | PMF_DUCKED);
             }

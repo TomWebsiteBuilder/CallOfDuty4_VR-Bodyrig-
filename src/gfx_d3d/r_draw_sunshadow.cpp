@@ -55,7 +55,7 @@ void R_DrawSunShadowMap(
     R_InitCmdBufSourceState(&state, &viewInfo->input, 0);
     R_SetRenderTargetSize(&state, R_RENDERTARGET_SHADOWMAP_SUN);
 
-    const float biasMultiplier = (partitionIndex == 1) ? 2.5f : 1.0f;
+    const float biasMultiplier = (partitionIndex == 1) ? 1.25f : 1.0f;
     if (r_rendererInUse->current.integer || gfxMetrics.shadowmapBuildTechType != TECHNIQUE_BUILD_SHADOWMAP_COLOR)
     {
         x = sm_polygonOffsetBias->current.value * biasMultiplier * 0.25f * viewInfo->sunShadow.partition[partitionIndex].shadowViewParms.projectionMatrix.m[2][2];

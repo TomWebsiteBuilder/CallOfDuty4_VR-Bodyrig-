@@ -1224,10 +1224,10 @@
          "Near and far depth values for the shadow map overlay");
      minbr.value.max = 8.0f;
      minbr.value.min = 0.0f;
-     sm_polygonOffsetScale = Dvar_RegisterFloat("sm_polygonOffsetScale", 4.0f, minbr, DVAR_NOFLAG, "Shadow map offset scale");
+     sm_polygonOffsetScale = Dvar_RegisterFloat("sm_polygonOffsetScale", 2.0f, minbr, DVAR_NOFLAG, "Shadow map offset scale");
      minbs.value.max = 32.0f;
      minbs.value.min = 0.0f;
-     sm_polygonOffsetBias = Dvar_RegisterFloat("sm_polygonOffsetBias", 1.0f, minbs, DVAR_NOFLAG, "Shadow map offset bias");
+     sm_polygonOffsetBias = Dvar_RegisterFloat("sm_polygonOffsetBias", 0.5f, minbs, DVAR_NOFLAG, "Shadow map offset bias");
      minbt.value.max = 32.0f;
      minbt.value.min = 0.0625f;
      sm_sunSampleSizeNear = Dvar_RegisterFloat("sm_sunSampleSizeNear", 0.25f, minbt, DVAR_SAVED | DVAR_CHEAT, "Shadow sample size");

@@ -566,6 +566,10 @@ void VR_PublishWeaponBoltAnchorWorld(
 // or bolt catch release should trigger slide forward / cocking audio.
 bool VR_ConsumeManualReloadBoltRackSoundPending(int weaponIndex);
 
+// Returns true and resets the pending flag when initial slide pull-back motion
+// should trigger slide pull / racking rearward audio.
+bool VR_ConsumeManualReloadBoltPullSoundPending(int weaponIndex);
+
 // Returns the active manual bolt-rack reload state so cgame can animate the
 // weapon's bolt bone and attach the off-hand glove while racking.
 bool VR_GetManualReloadBoltRackState(
@@ -583,7 +587,17 @@ void VR_UpdatePhysicalBodyHolstersAndKnife(
     const float cameraOrigin[3],
     const float cameraAxis[3][3],
     int activeWeaponIndex,
-    bool activeWeaponIsPistol = false);
+    int activeWeaponHomeSlot = 2);
+
+// Resolves carried weapons into Slot 1 (Hip Holster / Sidearm / Secondary)
+// and Slot 2 (Chest/Shoulder Sling / Primary).
+// Preserves persistent assignment across weapon switches so dual-primary loadouts
+// (such as M4 SOPMOD + M21 Sniper in Blackout) maintain stable holster positions.
+void VR_ResolveCarriedWeaponSlots(
+    const unsigned int weapons[4],
+    unsigned int currentWeapon,
+    int* outSlot1Weapon,
+    int* outSlot2Weapon);
 
 // Returns true once on the frame a physical holster grab/stow requests a
 // weapon switch in CL_CreateCmd. If targetSlot is non-null, receives 1 for

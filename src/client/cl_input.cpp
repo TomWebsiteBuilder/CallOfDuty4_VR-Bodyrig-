@@ -2204,60 +2204,57 @@ void __cdecl CL_CreateCmd(usercmd_s *result)
             &vrManualFragHeld,
             &vrManualTacticalHeld);
 
-        const WeaponDef* currentDef = BG_GetWeaponDef(vrGrenadePlayerState->weapon);
-        const bool currentIsPistol = (currentDef != nullptr && currentDef->weapClass == WEAPCLASS_PISTOL);
+        int slot1Weapon = 0;
+        int slot2Weapon = 0;
+        VR_ResolveCarriedWeaponSlots(
+            vrGrenadePlayerState->weapons,
+            vrGrenadePlayerState->weapon,
+            &slot1Weapon,
+            &slot2Weapon);
+
+        uint32_t activeBaseWeapon = vrGrenadePlayerState->weapon;
+        if (activeBaseWeapon > 0u)
+        {
+            const WeaponDef* curDef = BG_GetWeaponDef(activeBaseWeapon);
+            if (curDef != nullptr &&
+                curDef->inventoryType == WEAPINVENTORY_ALTMODE &&
+                curDef->altWeaponIndex > 0u)
+            {
+                activeBaseWeapon = curDef->altWeaponIndex;
+            }
+        }
+
+        const int activeWeaponHomeSlot =
+            (activeBaseWeapon == static_cast<uint32_t>(slot1Weapon)) ? 1 : 2;
 
         VR_UpdatePhysicalBodyHolstersAndKnife(
             vrGrenadeCgameGlob->refdef.vieworg,
             vrGrenadeCgameGlob->refdef.viewaxis,
             vrGrenadePlayerState->weapon,
-            currentIsPistol);
+            activeWeaponHomeSlot);
 
         int targetHolsterSlot = 0;
         if (VR_ConsumePhysicalHolsterWeaponSwitch(&targetHolsterSlot))
         {
             const uint32_t currentWeapon = vrGrenadePlayerState->weapon;
-            int matchingWeapon = 0;
-            int fallbackWeapon = 0;
-            const int highestWeapIndex = BG_GetNumWeapons() - 1;
-            for (int w = 1; w <= highestWeapIndex; ++w)
+            int selectedWeapon = 0;
+            if (targetHolsterSlot == 1)
             {
-                if (!Com_BitCheckAssert(vrGrenadePlayerState->weapons, w, 16))
-                    continue;
-
-                const WeaponDef* def = BG_GetWeaponDef(w);
-                if (def == nullptr ||
-                    def->inventoryType == WEAPINVENTORY_ALTMODE ||
-                    def->inventoryType == WEAPINVENTORY_ITEM ||
-                    def->inventoryType == WEAPINVENTORY_OFFHAND)
-                {
-                    continue;
-                }
-
-                const bool isPistol = (def->weapClass == WEAPCLASS_PISTOL);
-                const bool matchesSlot = (targetHolsterSlot == 1) ? isPistol : !isPistol;
-
-                if (matchesSlot)
-                {
-                    matchingWeapon = w;
-                    // If currentWeapon already matches this holster, keep it!
-                    if (w == static_cast<int>(currentWeapon))
-                    {
-                        break;
-                    }
-                }
-                else if (fallbackWeapon == 0)
-                {
-                    fallbackWeapon = w;
-                }
+                selectedWeapon = (slot1Weapon > 0) ? slot1Weapon : slot2Weapon;
+            }
+            else
+            {
+                selectedWeapon = (slot2Weapon > 0) ? slot2Weapon : slot1Weapon;
             }
 
-            const int selectedWeapon = (matchingWeapon > 0) ? matchingWeapon : fallbackWeapon;
-            if (selectedWeapon > 0 && selectedWeapon != static_cast<int>(currentWeapon))
+            if (selectedWeapon > 0)
             {
-                CG_SelectWeaponIndex(0, static_cast<uint32_t>(selectedWeapon));
-                Com_Printf(0, "[VR][HOLSTER] Selected %s weapon index %d.\n",
-                    targetHolsterSlot == 1 ? "hip sidearm" : "shoulder sling primary", selectedWeapon);
+                if (selectedWeapon != static_cast<int>(currentWeapon))
+                {
+                    CG_SelectWeaponIndex(0, static_cast<uint32_t>(selectedWeapon));
+                }
+                Com_Printf(0, "[VR][HOLSTER] Selected/drew %s weapon index %d.\n",
+                    targetHolsterSlot == 1 ? "hip sidearm/secondary" : "shoulder sling primary", selectedWeapon);
             }
         }
 

@@ -1887,15 +1887,12 @@ void __cdecl CG_DrawActive(int localClientNum)
         {
             // KISAK_SP_VR_FIXED_SCOPE_SHARP_VIEW_AND_TRACER_V5
             // Keep mission/cinematic blur in the normal eyes, but do not bake
-            // it into the optical source that will be magnified across both
-            // eyes.
-            if (vrFixedScopeActive)
-            {
-                scopeRefdef.blurRadius = 0.0f;
-                scopeRefdef.dof.nearBlur = 0.0f;
-                scopeRefdef.dof.farBlur = 0.0f;
-            }
-            else
+            // it into the optical source that will be magnified across both eyes.
+            scopeRefdef.blurRadius = 0.0f;
+            scopeRefdef.dof.nearBlur = 0.0f;
+            scopeRefdef.dof.farBlur = 0.0f;
+
+            if (!vrFixedScopeActive)
             {
                 // KISAK_SP_VR_PHYSICAL_SCOPE_NEAR_CLIP_V116
                 // Port the proven World at War physical-optic near plane.

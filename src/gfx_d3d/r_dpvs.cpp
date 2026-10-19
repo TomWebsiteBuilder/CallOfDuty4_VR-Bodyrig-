@@ -3077,6 +3077,14 @@ uint32_t __cdecl R_PortalClipPlanes(
                 v9->coeffs[2] = v10[2];
                 a = &planes[planeCount];
                 a->coeffs[3] = 0.001 - Vec3Dot(a->coeffs, &(*winding)[3 * windingVertIndex]);
+#if defined(XR_USE_GRAPHICS_API_D3D11)
+                if (VR_D3D9IsSameFrameStereoEnabled())
+                {
+                    // Expand portal clip planes outward by 3.0 units (~7.6 cm) to cover
+                    // stereo IPD baseline separation between eyes without culling doorway edges.
+                    a->coeffs[3] += 3.0f;
+                }
+#endif
                 a->side[0] = COERCE_INT(a->coeffs[0]) <= 0 ? 0 : 0xC;
                 a->side[1] = COERCE_INT(a->coeffs[1]) <= 0 ? 4 : 16;
                 a->side[2] = COERCE_INT(a->coeffs[2]) <= 0 ? 8 : 20;
@@ -3293,6 +3301,12 @@ uint32_t __cdecl R_AddBevelPlanes(
                 colorLtCyan);
         a = &planes[planeCount];
         a->coeffs[3] = 0.001 - Vec3Dot(a->coeffs, bevelVerts[bevelVertIndex]);
+#if defined(XR_USE_GRAPHICS_API_D3D11)
+        if (VR_D3D9IsSameFrameStereoEnabled())
+        {
+            a->coeffs[3] += 3.0f;
+        }
+#endif
         a->side[0] = COERCE_INT(a->coeffs[0]) <= 0 ? 0 : 0xC;
         a->side[1] = COERCE_INT(a->coeffs[1]) <= 0 ? 4 : 16;
         a->side[2] = COERCE_INT(a->coeffs[2]) <= 0 ? 8 : 20;
@@ -3338,24 +3352,10 @@ void __cdecl R_VisitPortalsForCell(
     GfxPortal *portal; // [esp+1Ch] [ebp-8h]
     int portalIndex; // [esp+20h] [ebp-4h]
 
-#if defined(XR_USE_GRAPHICS_API_D3D11)
-    if (VR_D3D9IsSameFrameStereoEnabled())
-    {
-        // In same-frame stereo VR, all views share the final generated view's
-        // draw-surface list. If geometry visible to an earlier view (e.g. Left Eye)
-        // is culled by the final view's narrow single-eye portal pyramid cone,
-        // it disappears from both eyes, causing severe polygon flickering and popping
-        // around doorways, stalls, and openings at long distances (e.g. the Killhouse
-        // firing range). Use the full stereo camera frustum for cell surface culling
-        // so neither eye ever clips out geometry visible through an open portal.
-        DpvsView *dpvsView = dpvsGlob.views[scene.dpvs.localClientNum];
-        R_AddCellSurfacesAndCullGroupsInFrustumDelayed(cell, dpvsView->frustumPlanes, dpvsView->frustumPlaneCount, dpvsView->frustumPlaneCount);
-    }
-    else
-#endif
-    {
-        R_AddCellSurfacesAndCullGroupsInFrustumDelayed(cell, planes, planeCount, frustumPlaneCount);
-    }
+    // In stereo VR, portal clipping planes are expanded outward by 3 units in
+    // R_PortalClipPlanes and R_AddBevelPlanes to cover IPD parallax differences
+    // across both eyes without bypassing portal occlusion culling.
+    R_AddCellSurfacesAndCullGroupsInFrustumDelayed(cell, planes, planeCount, frustumPlaneCount);
     R_SetCellVisible(cell);
     R_SetAncestorListStatus(parentPortal, 1);
     if (clipChildren)
