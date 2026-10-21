@@ -427,3 +427,11 @@ res/
 .idea/*
 IDA/*
 KisakCOD/.idea/*
+# Machine-specific continuation records and helpers stay private.
+/docs/BODYRIG_CONTINUATION.md
+/docs/COD4_VR_BODYRIG_HANDOVER_SUMMARY.md
+/docs/COD4_VR_GAME_TESTING_CHECKLIST.md
+/docs/COD4_VR_IN_GAME_TESTING_CHECKLIST.md
+/tools/local-bodyrig/
+/COD4-VR-Private-Continuation*/
+/Private-Agent-Notes/
