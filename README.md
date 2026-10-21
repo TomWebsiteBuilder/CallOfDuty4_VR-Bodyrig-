@@ -58,24 +58,87 @@ in-headset acceptance testing.
 See [the upstream VR documentation](docs/UPSTREAM-VR-README.md) for general
 project information.
 
-## Build and run
+## Install on Windows
 
-You need Visual Studio 2022 C++ tools, CMake, the DirectX SDK/dependencies,
-an OpenXR runtime, and your own legitimate original COD4 installation.
+**This BodyRig fork currently has no prebuilt installer or portable release.**
+To play this version on Windows, build it from source using the steps below.
+GitHub's **Code → Download ZIP** is source code, not a playable mod package.
+Upstream releases do not contain this fork's BodyRig changes. The guided Setup
+and ZIP instructions in [INSTALL.md](INSTALL.md) describe upstream packages;
+use the manual steps here for this fork.
 
-```bash
+### 1. Prepare the game and build tools
+
+- Install your legitimate **original 2007 Call of Duty 4: Modern Warfare** and
+  launch single-player once. Modern Warfare Remastered is not compatible.
+- Copy the complete game folder into a separate, writable folder for testing.
+  It must contain `iw3sp.exe`, `localization.txt`, `main` and `zone`.
+  Apply the mod to this copy so the original installation stays intact.
+- Install Git for Windows, CMake, and **Visual Studio 2022** (or its Build Tools)
+  with **Desktop development with C++**, the MSVC v143 x86/x64 tools and a
+  Windows SDK.
+- Install the [DirectX SDK (June 2010)](https://www.microsoft.com/en-us/download/details.aspx?id=6812)
+  for the legacy build headers and libraries. Open a new terminal after
+  installation so its `DXSDK_DIR` environment variable is available.
+- Install the [DirectX End-User Runtimes (June 2010)](https://www.microsoft.com/en-us/download/details.aspx?id=8109)
+  if the legacy runtime is missing. Extract the download and run `DXSETUP.exe`.
+  A current DirectX version alone does not supply every legacy D3DX library.
+
+### 2. Build the Windows executables
+
+Open **Developer PowerShell for VS 2022** and run these commands from a folder
+where you keep source projects:
+
+```powershell
 git clone --recurse-submodules https://github.com/TomWebsiteBuilder/CallOfDuty4_VR-Bodyrig-.git
 cd CallOfDuty4_VR-Bodyrig-
+Test-Path "$env:DXSDK_DIR/Include/d3dx9.h"
 cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
 cmake --build build --config Release --target KisakCOD-sp KisakCOD-VR-Configurator KisakCOD-VR-Input-Mapper KisakCOD-VR-Test --parallel 8
 ```
 
-Executables are written to `bin/Release`. See [INSTALL.md](INSTALL.md),
-and [upstream build instructions](docs/UPSTREAM-VR-README.md#build-from-source)
-for setup details.
-Use a separate experimental game directory. The repository contains source and
-development documentation, not the original game's data or a ready-to-play
-bundled game installation.
+The `Test-Path` check should return `True`. If it returns `False`, set
+`$env:DXSDK_DIR` to the folder where you installed the June 2010 SDK before
+configuring CMake. Use **Win32**, even on 64-bit Windows: the game and its
+libraries are 32-bit. Wait for a successful Release build before continuing.
+The executables are written to `bin\Release` in the source folder.
+
+### 3. Copy the mod into your separate game folder
+
+Using File Explorer, copy the following files from the source folder into the
+root of your **game copy**, beside `iw3sp.exe`:
+
+| Source | Destination in the game copy |
+| --- | --- |
+| `bin/Release/KisakCOD-sp.exe` | `KisakCOD-sp.exe` |
+| `bin/Release/KisakCOD-VR-Configurator.exe` | `KisakCOD-VR-Configurator.exe` |
+| `bin/Release/KisakCOD-VR-Input-Mapper.exe` | `KisakCOD-VR-Input-Mapper.exe` |
+| `bin/Release/KisakCOD-VR-Test.exe` | `KisakCOD-VR-Test.exe` (optional testing launcher) |
+| `deps/steamsdk/steam_api.dll` | `steam_api.dll` |
+| `deps/binklib/binkw32.dll` | `binkw32.dll` |
+| `deps/msslib/dlls/mss32.dll` | `mss32.dll` |
+| Contents of `deps/msslib/dlls/miles/` | Merge into `miles/` |
+| `release/package/Launch-KisakCOD-VR.bat` | `Launch-KisakCOD-VR.bat` |
+| `release/package/Launch-KisakCOD-VR-Diagnostics.bat` | `Launch-KisakCOD-VR-Diagnostics.bat` |
+| `release/package/VR-Settings.bat` | `VR-Settings.bat` |
+
+Allow replacement of the matching runtime files **in the game copy**.
+Keep `iw3sp.exe` under its original name. The mod uses your own installed game
+assets; this repository does not include them.
+
+### 4. Configure VR and launch
+
+1. Connect your headset and start your VR runtime. For OpenXR, select a runtime
+   that supports 32-bit applications. For the experimental OpenVR backend,
+   start SteamVR first. See [runtime backend details](INSTALL.md#runtime-backend).
+2. Run `KisakCOD-VR-Configurator.exe` from the game copy. Select your headset,
+   controllers and runtime, then open **Setup & Compatibility** and rescan.
+3. Resolve any **Blocked** items, save your settings, and use **Save & Launch**.
+4. For later sessions, start the runtime and run `Launch-KisakCOD-VR.bat`.
+
+If a DLL is missing or the headset stays blank, see
+[common problems](INSTALL.md#common-problems). Windows headset compatibility
+for this experimental fork still needs testing; the known issues above apply.
 
 ## Credits and licence
 
